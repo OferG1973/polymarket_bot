@@ -51,7 +51,7 @@ print(f"   Output: {OUTPUT_FILE}")
 
 
 # Override the CONFIG['polymarket_tag'] if an up-to-date value is fetched
-resolved_tag = get_polymarket_tag_for_asset(CURRENT_ASSET)
+resolved_tag = get_polymarket_tag_for_asset('Crypto')#CURRENT_ASSET
 if resolved_tag:
     CONFIG["polymarket_tag"] = resolved_tag
     print(f"   Polymarket tag dynamically set to: {resolved_tag}")
@@ -71,20 +71,27 @@ def calculate_rsi(series, period=14):
 def fetch_market_data():
     print("📉 Fetching fresh financial history (730 days)...")
     
-    # We always fetch BTC and Nasdaq for correlation context
     tickers = [CONFIG['ticker'], "BTC-USD", "^IXIC"]
-    tickers = list(set(tickers)) # Remove duplicates (if asset is BTC)
+    tickers = list(set(tickers))
     
+    # Download
     data = yf.download(tickers, period="730d", interval="1h", progress=False)['Close']
     
+    # --- TIMEZONE FIX ---
+    # 1. If data is Naive (no timezone), assume UTC (yfinance default for crypto)
     if data.index.tz is None:
         data.index = data.index.tz_localize('UTC')
     else:
+        # 2. If data is Aware (e.g. New York), CONVERT to UTC
         data.index = data.index.tz_convert('UTC')
+
+    # DEBUG: Print the exact range of your data
+    print(f"   ⏱️ Data Start: {data.index[0]}")
+    print(f"   ⏱️ Data End:   {data.index[-1]}")
+    # --------------------
 
     df = pd.DataFrame(index=data.index)
     
-    # 1. Target Asset Features (The one we are predicting)
     target_col = CONFIG['ticker']
     df['Price'] = data[target_col]
     df['Ret'] = df['Price'].pct_change()
@@ -93,12 +100,11 @@ def fetch_market_data():
     df['SMA50'] = df['Price'].rolling(window=50).mean()
     df['Trend'] = (df['Price'] - df['SMA50']) / df['SMA50']
 
-    # 2. Market Context (Correlations)
-    # Always include BTC Context (unless we are trading BTC, then it's redundant but harmless)
+    # Correlations
     if "BTC-USD" in data.columns:
         df['BTC_Mom'] = data['BTC-USD'].pct_change(24)
     else:
-        df['BTC_Mom'] = 0 # Should not happen unless yahoo fails
+        df['BTC_Mom'] = 0 
         
     df['QQQ_Mom'] = data['^IXIC'].pct_change(24).ffill()
 
@@ -108,11 +114,20 @@ def fetch_market_data():
 
 # --- STEP 2: TIME TRAVEL LOOKUP ---
 def get_point_in_time_features(df, timestamp):
-    if timestamp.tzinfo is None: timestamp = timestamp.tz_localize('UTC')
+    # Ensure Market timestamp is UTC
+    if timestamp.tzinfo is None: 
+        timestamp = timestamp.tz_localize('UTC')
     
+    # 1. TOO OLD Check
     if timestamp < df.index[0]: return "TOO_OLD"
-    if timestamp > df.index[-1]: return "TOO_NEW"
     
+    # 2. TOO NEW Check
+    if timestamp > df.index[-1]: 
+        # DEBUG: Un-comment this line to see the exact discrepancy
+        # print(f"   DEBUG: Market {timestamp} > Data End {df.index[-1]}")
+        return "TOO_NEW"
+    
+    # 3. Standard Lookup
     idx = df.index.get_indexer([timestamp], method='pad')[0]
     if idx == -1: return "NO_MATCH"
     
