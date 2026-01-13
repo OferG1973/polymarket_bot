@@ -6,6 +6,7 @@ import numpy as np
 import os
 import argparse
 from collections import Counter
+from datetime import datetime, timedelta
 from bedrock_parser import MarketParser
 
 # --- ARGUMENT PARSING ---
@@ -13,7 +14,8 @@ parser = argparse.ArgumentParser(description="Polymarket Data Pipeline")
 parser.add_argument("--asset", type=str, default="BTC", choices=["BTC", "ETH", "SOL"], help="Asset to train on")
 args = parser.parse_args()
 
-# --- DYNAMIC CONFIGURATION ---
+# --- CONFIGURATION ---
+
 ASSET_MAP = {
     "BTC": {"ticker": "BTC-USD", "keywords": ["bitcoin", "BTC"], "polymarket_tag": ""},
     "ETH": {"ticker": "ETH-USD", "keywords": ["ethereum", "ETH"], "polymarket_tag": ""},
@@ -33,6 +35,7 @@ def get_polymarket_tag_for_asset(asset_name):
         print(f"❌ Could not get Polymarket tag for {asset_name}: {e}")
         return None
 
+crypto_tag = get_polymarket_tag_for_asset('Crypto')
 
 for asset, asset_config in ASSET_MAP.items():
     tag = get_polymarket_tag_for_asset(asset_config["keywords"][0])
@@ -40,24 +43,22 @@ for asset, asset_config in ASSET_MAP.items():
         ASSET_MAP[asset]["polymarket_tag"] = tag
 
 
+
 CURRENT_ASSET = args.asset
 CONFIG = ASSET_MAP[CURRENT_ASSET]
-OUTPUT_FILE = f"data_{CURRENT_ASSET}.csv" # e.g. data_BTC.csv, data_ETH.csv
+OUTPUT_FILE = f"data_{CURRENT_ASSET}.csv"
 MIN_SAMPLES_NEEDED = 100
 
 print(f"🚀 INITIALIZING PIPELINE FOR: {CURRENT_ASSET}")
 print(f"   Ticker: {CONFIG['ticker']}")
 print(f"   Output: {OUTPUT_FILE}")
-
-
 # Override the CONFIG['polymarket_tag'] if an up-to-date value is fetched
-resolved_tag = get_polymarket_tag_for_asset('Crypto')#CURRENT_ASSET
+resolved_tag = get_polymarket_tag_for_asset(CURRENT_ASSET)
 if resolved_tag:
     CONFIG["polymarket_tag"] = resolved_tag
     print(f"   Polymarket tag dynamically set to: {resolved_tag}")
 else:
     print(f"   Using default polymarket tag for {CURRENT_ASSET}: {CONFIG['polymarket_tag']}")
-
 
 # --- HELPER: RSI ---
 def calculate_rsi(series, period=14):
@@ -77,18 +78,14 @@ def fetch_market_data():
     # Download
     data = yf.download(tickers, period="730d", interval="1h", progress=False)['Close']
     
-    # --- TIMEZONE FIX ---
-    # 1. If data is Naive (no timezone), assume UTC (yfinance default for crypto)
+    # Timezone Fix
     if data.index.tz is None:
         data.index = data.index.tz_localize('UTC')
     else:
-        # 2. If data is Aware (e.g. New York), CONVERT to UTC
         data.index = data.index.tz_convert('UTC')
 
-    # DEBUG: Print the exact range of your data
     print(f"   ⏱️ Data Start: {data.index[0]}")
     print(f"   ⏱️ Data End:   {data.index[-1]}")
-    # --------------------
 
     df = pd.DataFrame(index=data.index)
     
@@ -115,16 +112,25 @@ def fetch_market_data():
 # --- STEP 2: TIME TRAVEL LOOKUP ---
 def get_point_in_time_features(df, timestamp):
     # Ensure Market timestamp is UTC
-    if timestamp.tzinfo is None: 
-        timestamp = timestamp.tz_localize('UTC')
+    if timestamp.tzinfo is None: timestamp = timestamp.tz_localize('UTC')
     
     # 1. TOO OLD Check
     if timestamp < df.index[0]: return "TOO_OLD"
     
     # 2. TOO NEW Check
+    # Lag Tolerance: If market is newer than data by < 48h, use latest data
     if timestamp > df.index[-1]: 
-        # DEBUG: Un-comment this line to see the exact discrepancy
-        # print(f"   DEBUG: Market {timestamp} > Data End {df.index[-1]}")
+        diff = timestamp - df.index[-1]
+        if diff < timedelta(hours=48):
+            row = df.iloc[-1]
+            return {
+                "price": float(row['Price']),
+                "vol": float(row['Vol_24h']),
+                "rsi": float(row['RSI']),
+                "trend": float(row['Trend']),
+                "btc_mom": float(row['BTC_Mom']),
+                "qqq_mom": float(row['QQQ_Mom'])
+            }
         return "TOO_NEW"
     
     # 3. Standard Lookup
@@ -142,6 +148,43 @@ def get_point_in_time_features(df, timestamp):
         "qqq_mom": float(row['QQQ_Mom'])
     }
 
+def resolve_market_outcome(m):
+    """
+    Robustly determines if the market outcome was YES (1) or NO (0).
+    Checks Top-level fields AND Token fields.
+    """
+    # 1. Check Top Level 'resolution_outcome'
+    res = str(m.get("resolution_outcome", '')).strip().lower()
+    if "up" in res or "yes" in res or "true" in res or "1" in res:
+        return 1
+    if "down" in res or "no" in res or "false" in res or "0" in res:
+        return 0
+    
+    # Check Top Level 'outcomes' is not empty
+    outcomes = str(m.get("outcomes", '')).strip().lower()
+    if "up" in outcomes or "yes" in outcomes or "true" in outcomes or "1" in outcomes:
+        return 1
+    if "down" in outcomes or "no" in outcomes or "false" in outcomes or "0" in outcomes:
+        return 0
+
+    # 2. Check Top Level 'winner'
+    winner = str(m.get('winner', '')).strip().lower()
+    if winner == 'yes': return 1
+    if winner == 'no': return 0
+    
+    # 3. Check Tokens Array (Crucial for older/complex markets)
+    # The 'tokens' list often contains objects like:
+    # {"outcome": "Yes", "winner": true}
+    tokens = m.get('tokens')
+    if isinstance(tokens, list):
+        for t in tokens:
+            if t.get('winner') is True:
+                out = str(t.get('outcome', '')).strip().lower()
+                if out == 'yes': return 1
+                if out == 'no': return 0
+    
+    return None
+
 def load_existing_data():
     if os.path.exists(OUTPUT_FILE):
         try:
@@ -154,7 +197,7 @@ def load_existing_data():
     return pd.DataFrame(), set()
 
 # --- MAIN LOOP ---
-def process_markets():
+def process_markets(tag_id):
     existing_df, seen_questions = load_existing_data()
     parser = MarketParser()
     market_df = fetch_market_data()
@@ -167,8 +210,8 @@ def process_markets():
     MAX_DUPLICATES = 60 
     total_rejections = Counter()
     
-    # Use the primary keyword for the server-side search
     search_query = CONFIG['keywords'][0] 
+    
     
     print(f"\n🔍 Starting Search (Tag: {CONFIG['polymarket_tag']}, Query: {search_query})...")
     
@@ -180,15 +223,28 @@ def process_markets():
             print("✅ Overlap detected. Stopping.")
             break
 
+        # url = "https://gamma-api.polymarket.com/public-search"
+        # params = {
+        #     "q": search_query, # Using 'q' is generally broader and safer than slug_contains
+        #     "type": "markets",
+        #     "limit": limit,
+        #     "offset": offset, 
+        #     "order": "startDate",
+        #     "ascending": "false",
+        #     "closed": "true"
+        # }
+
         url = "https://gamma-api.polymarket.com/markets"
         params = {
             "closed": "true",
-            "tag_id": CONFIG['polymarket_tag'],
-            "slug_contains": search_query,
+            "tag_id": tag_id,
+            #"slug_contains": search_query,
+            #"q": search_query, # Using 'q' is generally broader and safer than slug_contains
             "limit": limit,
             "offset": offset, 
             "order": "startDate",
-            "ascending": "false"
+            "ascending": "false",
+            "related_tags": "true"
         }
         
         try:
@@ -201,14 +257,17 @@ def process_markets():
             
             for m in batch:
                 q_text = m['question']
-                # INSERT_YOUR_CODE
-                # --- Ignore questions listed in polymarkets_to_ignore.csv ---
+                
+                # --- IGNORE LIST ---
                 try:
                     import csv
-                    with open("polymarkets_to_ignore.csv", "r", encoding="utf-8") as ignore_file:
-                        ignored_questions = set(row[0].strip() for row in csv.reader(ignore_file) if row)
-                except Exception:
-                    ignored_questions = set()
+                    if os.path.exists("polymarkets_to_ignore.csv"):
+                        with open("polymarkets_to_ignore.csv", "r", encoding="utf-8") as ignore_file:
+                            ignored_questions = set(row[0].strip() for row in csv.reader(ignore_file) if row)
+                    else:
+                        ignored_questions = set()
+                except: ignored_questions = set()
+
                 if q_text in ignored_questions:
                     batch_rejections['Ignored Question'] += 1
                     continue
@@ -220,20 +279,18 @@ def process_markets():
                     continue
                 
                 # 2. Dynamic Keyword Check
-                # Must contain at least one of the keywords (e.g. "Ethereum" or "ETH")
                 if not any(k.lower() in q_text.lower() for k in CONFIG['keywords']):
                     batch_rejections['Keyword Mismatch'] += 1
                     continue
 
                 consecutive_duplicates = 0 
 
-                # 3. Parse (Parser auto-detects asset type from string)
+                # 3. Parse
                 parsed = parser.parse_question(q_text)
                 if not parsed:
                     batch_rejections['Parse Failed'] += 1
                     continue
                 
-                # Check if parsed asset matches our argument
                 if parsed.get('asset') != CURRENT_ASSET:
                     batch_rejections[f'Wrong Asset ({parsed.get("asset")})'] += 1
                     continue
@@ -254,13 +311,12 @@ def process_markets():
                     batch_rejections['No Price Data'] += 1
                     continue
 
-                # 5. Outcome
-                res = str(m.get('resolution_outcome', '')).lower()
-                label = 1 if res == 'yes' else (0 if res == 'no' else None)
-                if label is None and m.get('winner'):
-                    if m['winner'] == "Yes": label = 1
-                    elif m['winner'] == "No": label = 0
+                # 5. Outcome (NEW ROBUST FUNCTION)
+                label = resolve_market_outcome(m)
+                
                 if label is None: 
+                    # Debug print to verify why it failed
+                    # print(f"      [DEBUG] Res Fail: {q_text[:30]} | Winner: {m.get('winner')} | Tokens: {len(m.get('tokens', []))}")
                     batch_rejections['No Resolution'] += 1
                     continue
 
@@ -273,6 +329,8 @@ def process_markets():
                 if not isinstance(target, (int, float)): 
                     batch_rejections['Invalid Target'] += 1
                     continue
+
+                print(f"qtext: %s", q_text)
 
                 # Moneyness
                 if direction == 1: moneyness = np.log(current / target)
@@ -319,4 +377,10 @@ def process_markets():
         print(f"\n✅ {OUTPUT_FILE} is up to date.")
 
 if __name__ == "__main__":
-    process_markets()
+    print(f"🚀 process_markets(crypto_tag {crypto_tag})")
+    process_markets(crypto_tag)
+    keywords = ASSET_MAP[args.asset]["keywords"]
+    for key_item in keywords:
+        lower_key = key_item.lower()
+        print(f"🚀 process_markets(keyword: {lower_key})")
+        process_markets(get_polymarket_tag_for_asset(lower_key))
