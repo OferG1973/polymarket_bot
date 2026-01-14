@@ -8,6 +8,7 @@ import requests
 import yfinance as yf
 import argparse
 import warnings
+import logging
 from datetime import datetime
 from py_clob_client.client import ClobClient
 from bedrock_parser import MarketParser
@@ -21,6 +22,24 @@ warnings.filterwarnings('ignore')
 parser = argparse.ArgumentParser()
 parser.add_argument("--asset", type=str, default="BTC", choices=["BTC", "ETH", "SOL"])
 args = parser.parse_args()
+
+# --- LOGGING SETUP ---
+LOG_DIR = os.path.join("src", "Polymarket", "logs")
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+
+timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_file = os.path.join(LOG_DIR, f"trader_{args.asset}_{timestamp_str}.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s',
+    datefmt='%H:%M:%S',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
 
 # --- CONFIG ---
 CURRENT_ASSET = args.asset
@@ -40,7 +59,8 @@ HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137
 FAKE_BALANCE = 5000.00
 MAX_SPREAD_CENTS = 0.08
-CRYPTOPANIC_API_KEY = "YOUR_KEY"
+MIN_EDGE = 0.10 
+MIN_BET = 5.00
 
 try: nltk.download('vader_lexicon', quiet=True)
 except: pass
@@ -103,9 +123,17 @@ def init_log():
         with open(LOG_FILE, 'w', newline='') as f:
             csv.writer(f).writerow(["Timestamp", "Question", "Side", "AI_Prob", "Price", "Edge", "Bet", "Moneyness", "RSI"])
 
+def evaluate_side(side_name, ai_prob, market_price, balance, question_text):
+    edge = ai_prob - market_price
+    if edge <= 0: return f"SKIP (Neg Edge {edge:.1%})"
+    if edge < MIN_EDGE: return f"SKIP (Edge {edge:.1%} < {MIN_EDGE:.0%})"
+    bet = calculate_kelly_bet(balance, ai_prob, market_price)
+    if bet < MIN_BET: return f"SKIP (Bet ${bet:.2f} < ${MIN_BET})"
+    return "BUY", bet, edge
+
 def main():
     global FAKE_BALANCE
-    print(f"🚀 STARTING BIDIRECTIONAL TRADER FOR: {CURRENT_ASSET}")
+    logging.info(f"🚀 STARTING TRADER FOR: {CURRENT_ASSET}")
     init_log()
     
     models = []
@@ -117,7 +145,7 @@ def main():
         except: pass
     
     if not models:
-        print(f"❌ No models found.")
+        logging.error(f"❌ No models found in {DATA_DIR}.")
         return
 
     llm_parser = MarketParser()
@@ -125,33 +153,57 @@ def main():
 
     while True:
         try:
-            print(f"\n--- SCANNING {CURRENT_ASSET} [${FAKE_BALANCE:,.2f}] ---")
-            data = get_live_market_data()
-            if not data: time.sleep(10); continue
-            
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"Price: ${data['price']:,.2f} | RSI: {data['rsi']:.1f} | Timestamp: {ts}")
-            print(f"      ℹ️  Looking for 10% Edge on YES or NO (AI calculates its own probability based on 2 years of history and see if the winning probability is at least 10% better than what the market thinks (e.g. yes price is 60cent and Ai probability is 75%))")
+            logging.info(f"\n--- SCANNING {CURRENT_ASSET} [${FAKE_BALANCE:,.2f}] ---")
+            logging.info(f"ℹ️  The RSI (Relative Strength Index) is calculated by comparing the Average Gains vs. the Average Losses over a specific lookback period\n (in your bot's case, 14 hours). The RSI is used to measure the speed and magnitude of price\n changes, helping to identify overbought or oversold conditions.\nIf Buyers pull 5 times harder than Sellers, RSI is high (>70).\nIf Sellers pull 5 times harder than Buyers, RSI is low (<30).\nIf they pull equally, RSI is 50.\nAn RSI of 83.33 means buying pressure is massive compared to selling pressure. The asset is \"Overbought\" and typically due for a correction.\nHence market will shortly start to go down")
+            logging.info(f"ℹ️  Looking for 10% Edge on YES or NO")
 
-            search_q = CONFIG['keywords'][0]
-            resp = requests.get(f"https://gamma-api.polymarket.com/markets?active=true&closed=false&q={search_q}&limit=30").json()
+            data = get_live_market_data()
+            if not data: 
+                logging.warning("⚠️ Waiting for Yahoo Finance data...")
+                time.sleep(10); continue
             
+            logging.info(f"Price: ${data['price']:,.2f} | RSI: {data['rsi']:.1f}")
+
+            # Fetch active markets
+            search_q = CONFIG['keywords'][0]
+            url = f"https://gamma-api.polymarket.com/markets?active=true&closed=false&q={search_q}&limit=50"
+            resp = requests.get(url).json()
+            
+            if not isinstance(resp, list):
+                logging.error(f"⚠️ API Error: Expected list, got {type(resp)}")
+                resp = []
+
+            logging.info(f"      API returned {len(resp)} potential markets.")
+            
+            scanned_count = 0
             for m in resp:
-                q_text = m['question']
-                if not any(k in q_text for k in CONFIG['keywords']): continue
+                q_text = m.get('question', '')
                 
+                # --- FILTER 1: KEYWORD ---
+                # Fixed: Lowercase both for safety
+                if not any(k.lower() in q_text.lower() for k in CONFIG['keywords']):
+                    continue
+                
+                # --- FILTER 2: PARSER ---
                 parsed = llm_parser.parse_question(q_text)
-                if not parsed or parsed['asset'] != CURRENT_ASSET: continue
+                if not parsed or parsed['asset'] != CURRENT_ASSET:
+                    # logging.info(f"      [SKIP] Parser: {q_text[:30]}...") # Uncomment for deep debug
+                    continue
                 
+                scanned_count += 1
+                logging.info(f"   🔎 ANALYZING: {q_text}")
+
                 target = parsed['target_price']
                 direction = parsed.get('direction', 1)
                 
                 if target == "CURRENT_PRICE": target = data['price']
                 
+                # Calc Moneyness
                 if direction == 1: moneyness = np.log(data['price'] / target)
                 elif direction == -1: moneyness = np.log(target / data['price'])
                 else: moneyness = -abs(np.log(data['price'] / target))
                 
+                # Calc Time
                 try:
                     end_dt = pd.to_datetime(m['endDate']).replace(tzinfo=None)
                     hours = (end_dt - datetime.now()).total_seconds() / 3600
@@ -168,55 +220,60 @@ def main():
                     'qqq_mom': data['qqq_mom']
                 }])
 
-                # AI Prediction is probability of YES (1)
+                # AI Vote
                 votes = [mod.predict_proba(features)[0][1] for mod in models]
                 prob_yes = sum(votes) / len(votes)
                 prob_no = 1.0 - prob_yes
 
-                if not m.get('clobTokenIds') or len(m['clobTokenIds']) < 2: continue
+                if not m.get('clobTokenIds') or len(m['clobTokenIds']) < 2: 
+                    logging.info(f"      ⚠️ No Token IDs found.")
+                    continue
                 
-                # --- CHECK YES SIDE ---
+                # --- EVALUATE YES ---
                 token_yes = m['clobTokenIds'][0]
                 try:
-                    ob_yes = client.get_order_book(token_yes)
-                    if ob_yes.asks:
-                        ask_yes = float(ob_yes.asks[0].price)
-                        edge_yes = prob_yes - ask_yes
+                    ob = client.get_order_book(token_yes)
+                    if ob.asks:
+                        ask = float(ob.asks[0].price)
+                        res = evaluate_side("YES", prob_yes, ask, FAKE_BALANCE, q_text)
                         
-                        if edge_yes > 0.10:
-                            bet = calculate_kelly_bet(FAKE_BALANCE, prob_yes, ask_yes)
-                            if bet > 5:
-                                print(f"   🔥 BUY YES: {q_text[:40]}... (AI: {prob_yes:.2f} vs {ask_yes:.2f})")
-                                FAKE_BALANCE -= bet
-                                with open(LOG_FILE, 'a', newline='') as f:
-                                    csv.writer(f).writerow([
-                                        datetime.now(), m['question'], "YES", f"{prob_yes:.3f}", f"{ask_yes:.3f}", 
-                                        f"{edge_yes:.3f}", f"{bet:.2f}", f"{moneyness:.3f}", f"{data['rsi']:.1f}"
-                                    ])
+                        if isinstance(res, tuple) and res[0] == "BUY":
+                            _, bet, edge = res
+                            logging.info(f"      ✅ BUY YES: AI {prob_yes:.2f} vs {ask:.2f} | Edge {edge:.1%} | Bet ${bet:.2f}")
+                            FAKE_BALANCE -= bet
+                            with open(LOG_FILE, 'a', newline='') as f:
+                                csv.writer(f).writerow([datetime.now(), m['question'], "YES", f"{prob_yes:.3f}", f"{ask:.3f}", f"{edge:.3f}", f"{bet:.2f}", f"{moneyness:.3f}", f"{data['rsi']:.1f}"])
+                        else:
+                            logging.info(f"      • YES: AI {prob_yes:.2f} vs {ask:.2f} -> {res}")
+                    else:
+                        logging.info("      • YES: No Sellers (Empty Book)")
                 except: pass
 
-                # --- CHECK NO SIDE ---
+                # --- EVALUATE NO ---
                 token_no = m['clobTokenIds'][1]
                 try:
-                    ob_no = client.get_order_book(token_no)
-                    if ob_no.asks:
-                        ask_no = float(ob_no.asks[0].price)
-                        edge_no = prob_no - ask_no
+                    ob = client.get_order_book(token_no)
+                    if ob.asks:
+                        ask = float(ob.asks[0].price)
+                        res = evaluate_side("NO", prob_no, ask, FAKE_BALANCE, q_text)
                         
-                        if edge_no > 0.10:
-                            bet = calculate_kelly_bet(FAKE_BALANCE, prob_no, ask_no)
-                            if bet > 5:
-                                print(f"   🔥 BUY NO: {q_text[:40]}... (AI: {prob_no:.2f} vs {ask_no:.2f})")
-                                FAKE_BALANCE -= bet
-                                with open(LOG_FILE, 'a', newline='') as f:
-                                    csv.writer(f).writerow([
-                                        datetime.now(), m['question'], "NO", f"{prob_no:.3f}", f"{ask_no:.3f}", 
-                                        f"{edge_no:.3f}", f"{bet:.2f}", f"{moneyness:.3f}", f"{data['rsi']:.1f}"
-                                    ])
+                        if isinstance(res, tuple) and res[0] == "BUY":
+                            _, bet, edge = res
+                            logging.info(f"      ✅ BUY NO: AI {prob_no:.2f} vs {ask:.2f} | Edge {edge:.1%} | Bet ${bet:.2f}")
+                            FAKE_BALANCE -= bet
+                            with open(LOG_FILE, 'a', newline='') as f:
+                                csv.writer(f).writerow([datetime.now(), m['question'], "NO", f"{prob_no:.3f}", f"{ask:.3f}", f"{edge:.3f}", f"{bet:.2f}", f"{moneyness:.3f}", f"{data['rsi']:.1f}"])
+                        else:
+                            logging.info(f"      • NO:  AI {prob_no:.2f} vs {ask:.2f} -> {res}")
+                    else:
+                        logging.info("      • NO:  No Sellers (Empty Book)")
                 except: pass
-        
+            
+            if scanned_count == 0:
+                logging.warning("   ⚠️ No valid price markets found in this batch (Parser rejected all).")
+
         except Exception as e:
-            print(f"Loop Error: {e}")
+            logging.error(f"❌ Loop Error: {e}")
         
         time.sleep(60)
 
