@@ -42,13 +42,17 @@ def train_ensemble():
     
     for i in range(NUM_MODELS):
         seed = 42 + i
-        depth = 3 if i % 2 == 0 else 5 
-        
+        #depth = 3 if i % 2 == 0 else 5 
+        depth = 4
         clf = xgb.XGBClassifier(
-            n_estimators=300, learning_rate=0.02, max_depth=depth,
-            subsample=0.7, colsample_bytree=0.8,
+            n_estimators=300, 
+            learning_rate=0.1, 
+            max_depth=depth,
+            subsample=1.0, 
+            colsample_bytree=1.0,
             scale_pos_weight=scale_weight,
-            objective='binary:logistic', eval_metric='logloss',
+            objective='binary:logistic', 
+            eval_metric='logloss',
             random_state=seed
         )
         

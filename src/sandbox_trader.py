@@ -54,13 +54,22 @@ def get_live_market_data():
         tickers = [CONFIG['ticker'], "BTC-USD", "^IXIC"]
         tickers = list(set(tickers))
         
-        df = yf.download(tickers, period="5d", interval="1h", progress=False)['Close']
-        df['^IXIC'] = df['^IXIC'].ffill()
+        # Download and strictly copy
+        raw_data = yf.download(tickers, period="5d", interval="1h", progress=False)['Close']
+        df = raw_data.copy()
+        
+        # --- FIX: DROP EMPTY ROWS ---
+        # If Yahoo returns a row with NaN for our target asset, delete it.
+        target_col = CONFIG['ticker']
+        df = df.dropna(subset=[target_col])
+
+        # Handle stock data gaps (ffill)
+        if '^IXIC' in df.columns:
+            df['^IXIC'] = df['^IXIC'].ffill()
         
         if len(df) < 50: return None
         
         latest = {}
-        target_col = CONFIG['ticker']
         
         # Target Stats
         price_series = df[target_col]
@@ -70,15 +79,24 @@ def get_live_market_data():
         sma50 = price_series.rolling(50).mean().iloc[-1]
         latest['trend'] = (latest['price'] - sma50) / sma50
         
-        latest['vol'] = float(price_series.pct_change().rolling(24).std().iloc[-1])
+        # Volatility
+        latest['vol'] = float(price_series.pct_change(fill_method=None).rolling(24).std().iloc[-1])
         
         # Context Stats (Always BTC & Nasdaq)
         if "BTC-USD" in df.columns:
-            latest['btc_mom'] = float(df['BTC-USD'].pct_change(24).iloc[-1])
+            # Drop NaNs for BTC column specifically before calculating momentum
+            btc_series = df['BTC-USD'].dropna()
+            if len(btc_series) > 24:
+                latest['btc_mom'] = float(btc_series.pct_change(24, fill_method=None).iloc[-1])
+            else:
+                latest['btc_mom'] = 0.0
         else:
             latest['btc_mom'] = 0.0
             
-        latest['qqq_mom'] = float(df['^IXIC'].pct_change(24).iloc[-1])
+        if '^IXIC' in df.columns:
+            latest['qqq_mom'] = float(df['^IXIC'].pct_change(24, fill_method=None).iloc[-1])
+        else:
+            latest['qqq_mom'] = 0.0
         
         return latest
     except Exception as e:
@@ -125,7 +143,7 @@ def main():
             data = get_live_market_data()
             if not data: time.sleep(10); continue
             
-            print(f"Price: ${data['price']:,.2f} | RSI: {data['rsi']:.1f}")
+            print(f"Price: ${data['price']:,.2f} | RSI: {data['rsi']:.1f} | Timestamp: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}")
 
             # Fetch active markets for this asset
             search_q = CONFIG['keywords'][0]
