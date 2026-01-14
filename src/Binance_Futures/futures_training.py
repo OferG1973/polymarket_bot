@@ -3,78 +3,52 @@ import xgboost as xgb
 import argparse
 import numpy as np
 import os
-from sklearn.metrics import roc_auc_score
+import sys
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import TimeSeriesSplit
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--asset", type=str, default="BTC")
 args = parser.parse_args()
 
-INPUT_FILE = f"futures_data_{args.asset}.csv"
-MODEL_PREFIX = f"futures_ensemble_{args.asset}_" # Saves as futures_ensemble_BTC_0.json
+# --- PATH CONFIGURATION ---
+DATA_DIR = os.path.join("src", "Binance_Futures")
+INPUT_FILE = os.path.join(DATA_DIR, f"futures_data_{args.asset}.csv")
+MODEL_PREFIX = os.path.join(DATA_DIR, f"futures_ensemble_{args.asset}_")
 NUM_MODELS = 5
 
 def train():
-    print(f"🧠 Training 6H Ensemble for {args.asset}...")
+    print(f"🧠 Training Multi-Class Ensemble for {args.asset}...")
+    print(f"📂 Reading from: {INPUT_FILE}")
+    
     if not os.path.exists(INPUT_FILE):
-        print("❌ CSV not found. Run pipeline first.")
+        print("❌ CSV not found. Run futures_pipeline.py first.")
         return
 
     df = pd.read_csv(INPUT_FILE)
     
-    # Ensure Time Order
-    # (Assuming pipeline saved chronological, but strictly enforcing here won't hurt)
-    # df = df.sort_index() 
-
     features = ['rsi', 'trend_signal', 'volatility', 'momentum_24h', 'qqq_mom']
     target = 'target'
     
     X = df[features]
     y = df[target]
     
-    # Class Weight
-    pos = (y == 1).sum()
-    neg = (y == 0).sum()
-    scale = neg / pos if pos > 0 else 1.0
-    print(f"⚖️  Wins: {pos} | Flat/Loss: {neg} | Weight: {scale:.2f}")
-
-    # --- 1. WALK-FORWARD VALIDATION (The "Lab" Test) ---
-    print("\n🔬 Running Walk-Forward Validation (Sanity Check)...")
-    tscv = TimeSeriesSplit(n_splits=5)
-    
-    # Temporary model for testing
-    test_model = xgb.XGBClassifier(n_estimators=300, max_depth=5, learning_rate=0.05, scale_pos_weight=scale)
-    
-    scores = []
-    for train_index, test_index in tscv.split(X):
-        X_tr, X_te = X.iloc[train_index], X.iloc[test_index]
-        y_tr, y_te = y.iloc[train_index], y.iloc[test_index]
-        
-        test_model.fit(X_tr, y_tr)
-        preds = test_model.predict_proba(X_te)[:, 1]
-        try:
-            auc = roc_auc_score(y_te, preds)
-            scores.append(auc)
-            print(f"   Fold AUC: {auc:.4f}")
-        except: pass
-        
-    print(f"🏆 Average WFV AUC: {np.mean(scores):.4f}")
-
-    # --- 2. TRAIN FINAL ENSEMBLE (The "Factory" Build) ---
-    print(f"\n🏃 Training {NUM_MODELS} Production Models...")
+    # --- TRAIN ENSEMBLE ---
+    print(f"\n🏃 Training {NUM_MODELS} Models (0=Neutral, 1=Long, 2=Short)...")
     
     for i in range(NUM_MODELS):
         seed = 42 + i
-        # We vary subsample slightly to ensure diversity among models
+        
+        # Multi-class Configuration
         clf = xgb.XGBClassifier(
-            n_estimators=300,
-            learning_rate=0.05,
-            max_depth=5,
-            subsample=0.75,       # Randomly select 75% of data per tree (Bagging)
+            n_estimators=200,       # Tuned
+            learning_rate=0.01,     # Tuned
+            max_depth=3,            # Tuned
+            subsample=1.0,          # Tuned
             colsample_bytree=0.8,
-            scale_pos_weight=scale,
-            objective='binary:logistic',
-            eval_metric='logloss',
+            objective='multi:softprob',
+            num_class=3,                
+            eval_metric='mlogloss',
             random_state=seed
         )
         
@@ -82,6 +56,24 @@ def train():
         filename = f"{MODEL_PREFIX}{i}.json"
         clf.save_model(filename)
         print(f"   ✅ Saved {filename}")
+
+    # Validation
+    split = int(len(X) * 0.8)
+    X_test = X.iloc[split:]
+    y_test = y.iloc[split:]
+    
+    # Average Predictions
+    avg_preds = np.zeros((len(X_test), 3))
+    for i in range(NUM_MODELS):
+        m = xgb.XGBClassifier()
+        m.load_model(f"{MODEL_PREFIX}{i}.json")
+        avg_preds += m.predict_proba(X_test)
+    
+    avg_preds /= NUM_MODELS
+    final_pred_classes = np.argmax(avg_preds, axis=1)
+    
+    acc = accuracy_score(y_test, final_pred_classes)
+    print(f"\n🏆 Ensemble Accuracy: {acc:.2%}")
 
 if __name__ == "__main__":
     train()
