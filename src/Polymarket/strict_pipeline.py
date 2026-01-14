@@ -9,6 +9,7 @@ import json
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from bedrock_parser import MarketParser
+DATA_DIR = os.path.join("src", "Polymarket")
 
 # --- ARGUMENT PARSING ---
 parser = argparse.ArgumentParser()
@@ -221,8 +222,9 @@ def process_markets(tag_id):
     # Load Ignore List Once
     ignored_questions = set()
     try:
-        if os.path.exists("polymarkets_to_ignore.csv"):
-            with open("polymarkets_to_ignore.csv", "r", encoding="utf-8") as f:
+        filename = os.path.join(DATA_DIR, "polymarkets_to_ignore.csv")
+        if os.path.exists(filename):
+            with open(filename, "r", encoding="utf-8") as f:
                 import csv
                 ignored_questions = set(row[0].strip() for row in csv.reader(f) if row)
     except: pass

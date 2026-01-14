@@ -4,6 +4,8 @@ import re
 import csv
 import os
 from datetime import datetime
+DATA_DIR = os.path.join("src", "Polymarket")
+POLYMARKETS_TO_IGNORE_FILE = os.path.join(DATA_DIR, "polymarkets_to_ignore.csv")
 
 class MarketParser:
     def __init__(self, region_name="us-east-1"):
@@ -190,17 +192,16 @@ class MarketParser:
                 except ImportError:
                     pass  # for runtime environments where csv is always available
 
-                filename = "polymarkets_to_ignore.csv"
                 try:
                     # Append question to the CSV file
-                    with open(filename, 'a', newline='', encoding='utf-8') as csvfile:
+                    with open(POLYMARKETS_TO_IGNORE_FILE, 'a', newline='', encoding='utf-8') as csvfile:
                         writer = csv.writer(csvfile)
                         writer.writerow([question])
                 except Exception:
                     pass  # Ignore errors to not halt processing
                 return None
             j_start, j_end = txt.find('{'), txt.rfind('}') + 1
-            # When no data was returned, write the question to polymarkets_to_ignore.csv
+            # When no data was returned, write the question to src/Polymarkets/polymarkets_to_ignore.csv
             
             if j_start == -1:
                 try:
@@ -208,10 +209,9 @@ class MarketParser:
                 except ImportError:
                     pass  # for runtime environments where csv is always available
 
-                filename = "polymarkets_to_ignore.csv"
                 try:
                     # Append question to the CSV file
-                    with open(filename, 'a', newline='', encoding='utf-8') as csvfile:
+                    with open(POLYMARKETS_TO_IGNORE_FILE, 'a', newline='', encoding='utf-8') as csvfile:
                         writer = csv.writer(csvfile)
                         writer.writerow([question])
                 except Exception:

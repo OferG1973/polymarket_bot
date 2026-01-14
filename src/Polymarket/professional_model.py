@@ -12,7 +12,8 @@ args = parser.parse_args()
 
 ASSET = args.asset
 INPUT_FILE = f"data_{ASSET}.csv"
-MODEL_PREFIX = f"model_{ASSET}_" # e.g. model_ETH_
+DATA_DIR = os.path.join("src", "Polymarket")
+MODEL_PREFIX = os.path.join(DATA_DIR, f"model_{ASSET}_")# e.g. src/Polymarket/model_ETH_
 NUM_MODELS = 5
 
 def train_ensemble():
