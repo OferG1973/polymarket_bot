@@ -1,52 +1,51 @@
 Here is a sample response: 
 
-================================================================
-🔍 Analyzing market: Will Bitcoin hit $150k by December 31, 2026?
-================================================================
+=====================================================================
+🔍 Analyzing market: Bitcoin Up or Down - January 16, 3:45AM-4:00AM ET
+=====================================================================
 
-18:02:12 - HTTP Request: GET https://clob.polymarket.com/book?token_id=93694900555669388759405753550770573998169287228984912881955464376232163096213 "HTTP/2 200 OK"
-18:02:12 - HTTP Request: GET https://clob.polymarket.com/book?token_id=55119388124180116303253993098894090042427725500010038140578121972388485050538 "HTTP/2 200 OK"
-18:02:12 -    [SKIP] Will Bitcoin hit $150k by December 31, 2... Reason: No Edge. YES[AI:0.03/Mkt:0.99 -> SKIP (Neg Edge -95.8%)] | NO[AI:0.97/Mkt:0.99 -> SKIP (Neg Edge -2.2%)]
+19:01:19 - Market Liquidity: $9,721
+19:01:19 - Market End Date: 0.6 days left
+19:01:19 - HTTP Request: GET https://clob.polymarket.com/book?token_id=35311578342259194194089293676561048374562988743550497824747547938605146859658 "HTTP/2 200 OK"
+19:01:19 - HTTP Request: GET https://clob.polymarket.com/book?token_id=109595162460850759291521355137781757178293152107741630671573627965823295317911 "HTTP/2 200 OK"
+19:01:19 -    [SKIP] Bitcoin Up or Down - January 16, 3:45AM-... Reason: No Edge. YES[AI:0.61/Mkt:0.99 (Ref:0.500) -> SKIP (Dead Book: Ask 0.99 vs Ref 0.500)] | NO[AI:0.39/Mkt:0.99 (Ref:0.500) -> SKIP (Dead Book: Ask 0.99 vs Ref 0.500)]
 
-This log reveals a specific market condition called **Illiquidity** (or a "Wide Spread").
 
-Here is the breakdown of exactly what the bot saw and calculated.
+This log shows your bot acting exactly as a professional trader should: **It found a mathematical opportunity, but rejected it because the execution price was a rip-off.**
 
-### 1. The "YES" Side Analysis
-`YES[AI:0.03/Mkt:0.99 -> SKIP (Neg Edge -95.8%)]`
+Here is the step-by-step breakdown of exactly what happened in that millisecond.
 
-*   **AI Probability (0.03):** Your model analyzed the data (RSI, Trend, Time) and decided there is only a **3% chance** Bitcoin hits $150k by that date. It thinks this is extremely unlikely.
-*   **Market Price (0.99):** The cheapest "Sell Order" (Ask) on the order book for "Yes" is **99 cents**.
-*   **The Math:**
-    $$ 0.03 (Value) - 0.99 (Cost) = -0.96 $$
-*   **Conclusion:** This is a terrible deal. You would be paying 99 cents for a lottery ticket that the AI thinks is only worth 3 cents. The bot correctly skipped it.
+### 1. The AI's Opinion (The Signal)
+*   **`AI: 0.61`**: Your ensemble model analyzed the data (Bitcoin price, RSI, Trend, Nasdaq) and calculated a **61% probability** that Bitcoin will go UP in this specific timeframe.
+*   **The Opportunity:** Since your entry threshold is 60%, **the AI wanted to buy "YES" (Up).** It found a valid signal.
 
-### 2. The "NO" Side Analysis
-`NO[AI:0.97/Mkt:0.99 -> SKIP (Neg Edge -2.2%)]`
+### 2. The Market Reality (The Execution Problem)
+The bot then looked at the Order Book to see how much it costs to buy that "Yes" token.
+*   **`Mkt: 0.99` (Best Ask):** The cheapest seller currently willing to sell a "Yes" token is asking for **$0.99**.
+*   **`Ref: 0.500` (Last Trade):** The last time a trade actually occurred, it happened at **$0.50**.
 
-*   **AI Probability (0.97):** Since the AI thinks "Yes" is 3%, it mathematically thinks "No" is **97%**. It is very confident Bitcoin will *not* hit $150k.
-*   **Market Price (0.99):** The cheapest "Sell Order" for "No" is **also 99 cents**.
-*   **The Math:**
-    $$ 0.97 (\text{Value}) - 0.99 (\text{Cost}) = -0.02 $$
-*   **Conclusion:** Even though the AI thinks "No" is going to win, the price is too expensive.
-    *   If you buy at $0.99, you risk $0.99 to make **$0.01** profit.
-    *   The AI calculates that the risk is not worth that tiny reward. The "Edge" is negative (-2.2%).
+### 3. The "Dead Book" Logic
+This is the specific safety filter we added. The bot compared the **Current Ask ($0.99)** vs the **Last Trade ($0.50)**.
 
-### 3. The "Hidden" Insight: Why are both prices 0.99?
-In a healthy market, the prices of "Yes" and "No" usually add up to roughly **$1.00** (e.g., Yes $0.10 / No $0.90).
+*   **The Logic:** "The last trade was 50 cents. Now the cheapest seller wants 99 cents? That is a 100% markup. There is no real liquidity here, only 'stub' orders."
+*   **The Decision:** `SKIP (Dead Book...)`
 
-In your log, **Yes ($0.99) + No ($0.99) = $1.98**.
+### 4. What would have happened without this check?
+If you didn't have the "Dead Book" check, the bot would have calculated the edge like this:
+*   Value: **0.61** (61 cents)
+*   Cost: **0.99** (99 cents)
+*   Edge: **-0.38** (-38%)
+*   Result: **SKIP (Negative Edge)**.
 
-**This means there is NO LIQUIDITY.**
-*   There are no real sellers in this market.
-*   The only "Offers" sitting in the order book are "joke" offers from people trying to sell their shares for the maximum possible price ($0.99) hoping someone clicks by mistake.
-*   **Your bot successfully detected that there are no valid sellers and refused to trade.**
+So, even without the specific "Dead Book" error message, the math would have prevented the trade anyway. You cannot make money buying something for 99 cents that pays out $1.00 unless you are 99.1% sure it will win.
 
 ### Summary
-The bot worked perfectly. It saw a market where:
-1.  "Yes" was overpriced.
-2.  "No" was overpriced.
-3.  Therefore, it skipped both.
+1.  **The AI Worked:** It found a bullish signal (61% probability).
+2.  **The Market Failed:** There were no sellers offering a fair price (e.g., $0.50 or $0.55).
+3.  **The Bot Saved You:** It recognized the liquidity gap and refused to enter a bad trade.
+
+**Why does this happen?**
+This specific market ("January 16, 3:45AM-4:00AM") is a very niche, short-term timeframe. These often have very thin order books until just a few minutes before they start. The bot is correctly filtering out these "ghost towns."
 
 =================================
 

@@ -17,6 +17,56 @@ from bedrock_parser import MarketParser
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
+# --- INITIALIZE SYSTEM ---
+
+# AWS credentials should be set via environment variables or AWS credentials file
+# Set these in your environment or use: export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+# Or use AWS credentials file at ~/.aws/credentials
+if not os.environ.get("AWS_ACCESS_KEY_ID"):
+    raise ValueError("AWS_ACCESS_KEY_ID environment variable not set. Please set it before running.")
+if not os.environ.get("AWS_SECRET_ACCESS_KEY"):
+    raise ValueError("AWS_SECRET_ACCESS_KEY environment variable not set. Please set it before running.")
+if not os.environ.get("AWS_DEFAULT_REGION"):
+    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+
+
+# Run Ollama Qwen 2.5:14b model for local LLM
+def ensure_model_running(model_name="qwen2.5:14b", host="http://localhost:11434"):
+    try:
+        # 1. Check currently loaded models
+        response = requests.get(f"{host}/api/ps")
+        response.raise_for_status()
+        
+        running_models = [m['name'] for m in response.json().get('models', [])]
+        
+        # Ollama sometimes returns names like 'qwen2.5:14b-instruct', so we check if our string is in there
+        if any(model_name in running for running in running_models):
+            print(f"✅ Model '{model_name}' is already running.")
+            return True
+        
+        # 2. If not running, trigger a load
+        print(f"⏳ Model '{model_name}' not loaded. Initializing...")
+        
+        # We send an empty prompt with keep_alive to force it into VRAM
+        # keep_alive: -1 keeps it running indefinitely, or use "5m" for 5 minutes
+        requests.post(f"{host}/api/generate", json={
+            "model": model_name, 
+            "prompt": "", 
+            "keep_alive": "5m" 
+        })
+        
+        print(f"🚀 Model '{model_name}' has been started.")
+        return True
+
+    except requests.exceptions.ConnectionError:
+        print("❌ Error: Could not connect to Ollama. Is the Ollama app/service running?")
+        return False
+    except Exception as e:
+        print(f"❌ An error occurred: {e}")
+        return False
+
+ensure_model_running("qwen2.5:14b")
+
 # --- SILENCE WARNINGS ---
 warnings.filterwarnings('ignore')
 
@@ -59,8 +109,8 @@ CONFIG = ASSET_MAP[CURRENT_ASSET]
 # 455 = Solana
 ASSET_TAGS_MAP = {
     "BTC": ["21", "235", "620"],
-    #"ETH": ["21", "157"],
-    #"SOL": ["21", "455"]
+    "ETH": ["21", "157"],
+    "SOL": ["21", "455"]
 }
 TARGET_TAGS = ASSET_TAGS_MAP[CURRENT_ASSET]
 
@@ -157,7 +207,12 @@ def save_pending_opportunity(market, parsed_info):
         json.dump(data, f)
     logging.info(f"      💾 Saved opportunity to disk (Low Balance).")
 
-def evaluate_side(side_name, ai_prob, market_price, balance, question_text):
+# --- UPDATED EVALUATE SIDE (Includes Reference Price Logic) ---
+def evaluate_side(side_name, ai_prob, market_price, ref_price, balance, question_text):
+    # Detect Dead Book: If Ask is > 0.98 but Reference Price is < 0.90, it's illiquid junk.
+    if market_price > 0.98 and ref_price < 0.90:
+        return f"SKIP (Dead Book: Ask {market_price:.2f} vs Ref {ref_price:.3f})"
+
     edge = ai_prob - market_price
     if edge <= 0: return f"SKIP (Neg Edge {edge:.1%})"
     if edge < MIN_EDGE: return f"SKIP (Edge {edge:.1%} < {MIN_EDGE:.0%})"
@@ -187,7 +242,7 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
         end_dt = pd.to_datetime(end_date).replace(tzinfo=None)
         hours = (end_dt - datetime.now()).total_seconds() / 3600
         days_left = max(0.1, hours / 24.0)
-        market_end_date_str = f"Market End Date: {days_left} days left\n\n"
+        market_end_date_str = f"Market End Date: {days_left:.1f} days left\n\n"
     except Exception:
         market_end_date_str = f"Market End Date: {m.get('endDate')}\n\n"
 
@@ -229,6 +284,7 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
 
     # 3. Check Order Book
     try:
+        # Handle cases where tokens might be stored differently
         tokens = m.get('clobTokenIds')
         if isinstance(tokens, str): tokens = json.loads(tokens)
         
@@ -239,6 +295,17 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
         token_no = tokens[1]
     except: return "SKIP", 0, None, "Token Parse Error"
 
+    # --- GET REFERENCE PRICES FOR DEAD BOOK CHECK ---
+    try:
+        raw_ops = m.get('outcomePrices')
+        if isinstance(raw_ops, str): ops = json.loads(raw_ops)
+        else: ops = raw_ops
+        ref_yes = float(ops[0])
+        ref_no = float(ops[1])
+    except:
+        ref_yes = 0.0
+        ref_no = 0.0
+
     # Track reasons for rejection if we don't buy
     yes_status = "No Ask Found"
     no_status = "No Ask Found"
@@ -248,7 +315,7 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
         ob_yes = client.get_order_book(token_yes)
         if ob_yes.asks:
             ask_yes = float(ob_yes.asks[0].price)
-            res = evaluate_side("YES", prob_yes, ask_yes, global_balance, m['question'])
+            res = evaluate_side("YES", prob_yes, ask_yes, ref_yes, global_balance, m['question'])
             
             # If Buy
             if isinstance(res, tuple) and res[0] == "BUY":
@@ -262,8 +329,8 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
                         return "SAVE", 0, "YES", details
                     return "SKIP", 0, "YES", "Bet too small (Kelly)"
             
-            # If Skip, save specific reason (res is the skip string)
-            yes_status = f"AI:{prob_yes:.2f}/Mkt:{ask_yes:.2f} -> {res}"
+            # If Skip, save specific reason
+            yes_status = f"AI:{prob_yes:.2f}/Mkt:{ask_yes:.2f} (Ref:{ref_yes:.3f}) -> {res}"
             
     except Exception as e:
         if "No orderbook" in str(e): yes_status = "No Orderbook"
@@ -274,7 +341,7 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
         ob_no = client.get_order_book(token_no)
         if ob_no.asks:
             ask_no = float(ob_no.asks[0].price)
-            res = evaluate_side("NO", prob_no, ask_no, global_balance, m['question'])
+            res = evaluate_side("NO", prob_no, ask_no, ref_no, global_balance, m['question'])
             
             # If Buy
             if isinstance(res, tuple) and res[0] == "BUY":
@@ -289,7 +356,7 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
                     return "SKIP", 0, "NO", "Bet too small (Kelly)"
             
             # If Skip, save specific reason
-            no_status = f"AI:{prob_no:.2f}/Mkt:{ask_no:.2f} -> {res}"
+            no_status = f"AI:{prob_no:.2f}/Mkt:{ask_no:.2f} (Ref:{ref_no:.3f}) -> {res}"
 
     except Exception as e:
         if "No orderbook" in str(e): no_status = "No Orderbook"
@@ -337,9 +404,6 @@ def process_pending_markets(client, models, live_data):
                 os.remove(filepath)
             
             elif action == "SKIP":
-                # If it's no longer a good trade (price changed), delete it to stop checking
-                # Or keep it? Usually better to delete and let scanner find it again if it's hot.
-                # Here we delete to clean up stale data.
                 os.remove(filepath)
                 
         except Exception as e:
@@ -395,14 +459,12 @@ def main():
                     search_q = CONFIG['keywords'][0]
                     url = f"https://gamma-api.polymarket.com/markets"
                     params = {
-                        "active": "true",
-                        "closed": "false",
+                        "active": "true", "closed": "false",
                         "tag_id": tag_id,
                         "q": search_q,
-                        "order": "liquidity", # <--- Sort by Liquidity
-                        "ascending": "false", # <--- Highest first
-                        "limit": 50, 
-                        "offset": offset
+                        "order": "liquidity", # <--- Sort by Liquidity to find good markets first
+                        "ascending": "false",
+                        "limit": 50, "offset": offset
                     }
                     
                     resp = requests.get(url, params=params).json()
@@ -415,17 +477,14 @@ def main():
                     for m in resp:
                         q_text = m.get('question', '')
                         
-                        # --- FILTER 0: LIQUIDITY CHECK ---
+                        # Filter 0: Liquidity
                         try:
                             liq = float(m.get('liquidity', 0))
                             if liq < MIN_LIQUIDITY:
-                                logging.info(f"   [SKIP] Low Liquidity: ${liq:,.0f} for market: {q_text} (Min allowed liquidity: ${MIN_LIQUIDITY:,.0f})")
+                                logging.info(f"   [SKIP] Low Liquidity: ${liq:,.0f} for market: {q_text}")
                                 continue
                         except Exception as e: 
-                            logging.info(f"   [SKIP] Could not parse liquidity: {m.get('liquidity')} ({e}) for market: {q_text}")
                             continue
-
-                        q_text = m.get('question', '')
 
                         # Filter 1: Keyword
                         if not any(k.lower() in q_text.lower() for k in CONFIG['keywords']):
@@ -440,7 +499,7 @@ def main():
                             out_set = set(str(o).strip().lower() for o in outcomes)
                             valid_pairs = [{'yes', 'no'}, {'up', 'down'}, {'true', 'false'}]
                             if not any(out_set == pair for pair in valid_pairs):
-                                logging.info(f"   [SKIP] Bad Outcomes: {outcomes}")
+                                logging.info(f"   [SKIP] Bad Outcomes: {outcomes} for market: {q_text}")
                                 continue
                         except: continue
 
