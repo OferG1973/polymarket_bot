@@ -9,11 +9,62 @@ import yfinance as yf
 import argparse
 import warnings
 import logging
+import json
 from datetime import datetime
 from py_clob_client.client import ClobClient
 from bedrock_parser import MarketParser
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
+
+# --- INITIALIZE SYSTEM ---
+
+# AWS credentials should be set via environment variables or AWS credentials file
+# Set these in your environment or use: export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+# Or use AWS credentials file at ~/.aws/credentials
+if not os.environ.get("AWS_ACCESS_KEY_ID"):
+    raise ValueError("AWS_ACCESS_KEY_ID environment variable not set. Please set it before running.")
+if not os.environ.get("AWS_SECRET_ACCESS_KEY"):
+    raise ValueError("AWS_SECRET_ACCESS_KEY environment variable not set. Please set it before running.")
+if not os.environ.get("AWS_DEFAULT_REGION"):
+    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+
+
+# Run Ollama Qwen 2.5:14b model for local LLM
+def ensure_model_running(model_name="qwen2.5:14b", host="http://localhost:11434"):
+    try:
+        # 1. Check currently loaded models
+        response = requests.get(f"{host}/api/ps")
+        response.raise_for_status()
+        
+        running_models = [m['name'] for m in response.json().get('models', [])]
+        
+        # Ollama sometimes returns names like 'qwen2.5:14b-instruct', so we check if our string is in there
+        if any(model_name in running for running in running_models):
+            print(f"✅ Model '{model_name}' is already running.")
+            return True
+        
+        # 2. If not running, trigger a load
+        print(f"⏳ Model '{model_name}' not loaded. Initializing...")
+        
+        # We send an empty prompt with keep_alive to force it into VRAM
+        # keep_alive: -1 keeps it running indefinitely, or use "5m" for 5 minutes
+        requests.post(f"{host}/api/generate", json={
+            "model": model_name, 
+            "prompt": "", 
+            "keep_alive": "5m" 
+        })
+        
+        print(f"🚀 Model '{model_name}' has been started.")
+        return True
+
+    except requests.exceptions.ConnectionError:
+        print("❌ Error: Could not connect to Ollama. Is the Ollama app/service running?")
+        return False
+    except Exception as e:
+        print(f"❌ An error occurred: {e}")
+        return False
+
+ensure_model_running("qwen2.5:14b")
 
 # --- SILENCE WARNINGS ---
 warnings.filterwarnings('ignore')
@@ -154,19 +205,17 @@ def main():
     while True:
         try:
             logging.info(f"\n--- SCANNING {CURRENT_ASSET} [${FAKE_BALANCE:,.2f}] ---")
-            logging.info(f"ℹ️  The RSI (Relative Strength Index) is calculated by comparing the Average Gains vs. the Average Losses over a specific lookback period\n (in your bot's case, 14 hours). The RSI is used to measure the speed and magnitude of price\n changes, helping to identify overbought or oversold conditions.\nIf Buyers pull 5 times harder than Sellers, RSI is high (>70).\nIf Sellers pull 5 times harder than Buyers, RSI is low (<30).\nIf they pull equally, RSI is 50.\nAn RSI of 83.33 means buying pressure is massive compared to selling pressure. The asset is \"Overbought\" and typically due for a correction.\nHence market will shortly start to go down")
-            logging.info(f"ℹ️  Looking for 10% Edge on YES or NO")
-
             data = get_live_market_data()
             if not data: 
                 logging.warning("⚠️ Waiting for Yahoo Finance data...")
                 time.sleep(10); continue
             
             logging.info(f"Price: ${data['price']:,.2f} | RSI: {data['rsi']:.1f}")
+            logging.info(f"      ℹ️  Targeting: AI Probability > Market Price + 10% (Edge)")
 
             # Fetch active markets
             search_q = CONFIG['keywords'][0]
-            url = f"https://gamma-api.polymarket.com/markets?active=true&closed=false&q={search_q}&limit=50"
+            url = f"https://gamma-api.polymarket.com/markets?active=true&closed=false&q={search_q}&limit=50&tag_id=235"
             resp = requests.get(url).json()
             
             if not isinstance(resp, list):
@@ -178,20 +227,85 @@ def main():
             scanned_count = 0
             for m in resp:
                 q_text = m.get('question', '')
+                raw_outcomes = m.get('outcomes')
                 
+                # Check if market endDate is more than 24 hours from now
+                end_date_str = m.get('endDate')
+                if end_date_str:
+                    try:
+                        # Parse endDate string to datetime
+                        end_dt = datetime.fromisoformat(end_date_str.replace('Z','+00:00')) if 'Z' in end_date_str else datetime.fromisoformat(end_date_str)
+                        now = datetime.utcnow()
+                        # If using timezone-aware, convert now to UTC and ignore tz if end_dt is naive
+                        if end_dt.tzinfo is not None and end_dt.utcoffset() is not None:
+                            now = datetime.now(end_dt.tzinfo)
+                        delta = (end_dt - now).total_seconds()
+                        if delta > 24 * 3600:
+                            logging.info(f"      ⏳ [SKIP] Market ends in more than 24 hours: {end_date_str}")
+                            continue
+                    except Exception as e:
+                        logging.info(f"      ⚠️ [WARN] Could not parse endDate: {end_date_str} ({e})")
+
+
+                # --- VERBOSE RAW LOG ---
+                # Log outcome formatting to debug weird JSON strings
+                logging.info(f"   🔹 RAW: {q_text[:70]}... | Outcomes: {str(raw_outcomes)[:50]}")
+
                 # --- FILTER 1: KEYWORD ---
-                # Fixed: Lowercase both for safety
                 if not any(k.lower() in q_text.lower() for k in CONFIG['keywords']):
+                    logging.info(f"      ❌ [SKIP] Keyword mismatch")
                     continue
                 
-                # --- FILTER 2: PARSER ---
+                # --- FILTER 2: VALIDATE OUTCOMES ---
+                try:
+                    if isinstance(raw_outcomes, str):
+                        outcomes = json.loads(raw_outcomes)
+                    else:
+                        outcomes = raw_outcomes
+                    
+                    if not outcomes:
+                        logging.info(f"      ❌ [SKIP] Outcomes empty")
+                        continue
+
+                    # Normalize to lowercase set
+                    out_set = set(str(o).strip().lower() for o in outcomes)
+                    
+                    # Allowed Outcome Pairs
+                    valid_pairs = [
+                        {'yes', 'no'},
+                        {'up', 'down'},
+                        {'true', 'false'}
+                    ]
+                    
+                    if not any(out_set == pair for pair in valid_pairs):
+                        logging.info(f"      ❌ [SKIP] Invalid Outcomes: {out_set}")
+                        continue
+                        
+                except Exception as e:
+                    logging.info(f"      ❌ [SKIP] Outcome parse error: {e}")
+                    continue
+
+                # --- FILTER 3: PARSER ---
                 parsed = llm_parser.parse_question(q_text)
-                if not parsed or parsed['asset'] != CURRENT_ASSET:
-                    # logging.info(f"      [SKIP] Parser: {q_text[:30]}...") # Uncomment for deep debug
+                
+                if not parsed:
+                    logging.info(f"      ❌ [SKIP] Parser Failed (No Target/Asset found)")
                     continue
                 
+                if parsed.get('asset') != CURRENT_ASSET:
+                    logging.info(f"      ❌ [SKIP] Wrong Asset: {parsed.get('asset')}")
+                    continue
+                
+                # --- FILTER 4: TARGET TYPE CHECK ---
+                if parsed['target_price'] == "CURRENT_PRICE":
+                    pass 
+                elif not isinstance(parsed['target_price'], (int, float)):
+                    logging.info(f"      ❌ [SKIP] Invalid Target Price: {parsed['target_price']}")
+                    continue
+
+                # --- SUCCESSFUL VALIDATION ---
                 scanned_count += 1
-                logging.info(f"   🔎 ANALYZING: {q_text}")
+                logging.info(f"      ✅ ANALYZING MATH...")
 
                 target = parsed['target_price']
                 direction = parsed.get('direction', 1)
@@ -203,12 +317,13 @@ def main():
                 elif direction == -1: moneyness = np.log(target / data['price'])
                 else: moneyness = -abs(np.log(data['price'] / target))
                 
-                # Calc Time
                 try:
                     end_dt = pd.to_datetime(m['endDate']).replace(tzinfo=None)
                     hours = (end_dt - datetime.now()).total_seconds() / 3600
                     days_left = max(0.1, hours / 24.0)
-                except: continue
+                except: 
+                    logging.info(f"      ❌ [SKIP] Date Error")
+                    continue
 
                 features = pd.DataFrame([{
                     'moneyness': moneyness,
@@ -226,7 +341,7 @@ def main():
                 prob_no = 1.0 - prob_yes
 
                 if not m.get('clobTokenIds') or len(m['clobTokenIds']) < 2: 
-                    logging.info(f"      ⚠️ No Token IDs found.")
+                    logging.info(f"      ⚠️ [SKIP] No Orderbook Tokens.")
                     continue
                 
                 # --- EVALUATE YES ---
@@ -239,15 +354,19 @@ def main():
                         
                         if isinstance(res, tuple) and res[0] == "BUY":
                             _, bet, edge = res
-                            logging.info(f"      ✅ BUY YES: AI {prob_yes:.2f} vs {ask:.2f} | Edge {edge:.1%} | Bet ${bet:.2f}")
+                            logging.info(f"      🔥 BUY YES: AI {prob_yes:.2f} vs {ask:.2f} | Edge {edge:.1%} | Bet ${bet:.2f}")
                             FAKE_BALANCE -= bet
                             with open(LOG_FILE, 'a', newline='') as f:
                                 csv.writer(f).writerow([datetime.now(), m['question'], "YES", f"{prob_yes:.3f}", f"{ask:.3f}", f"{edge:.3f}", f"{bet:.2f}", f"{moneyness:.3f}", f"{data['rsi']:.1f}"])
                         else:
-                            logging.info(f"      • YES: AI {prob_yes:.2f} vs {ask:.2f} -> {res}")
+                            logging.info(f"      • YES: AI {prob_yes:.2f} vs Mkt {ask:.2f} -> {res}")
                     else:
                         logging.info("      • YES: No Sellers (Empty Book)")
-                except: pass
+                except Exception as e:
+                    if "No orderbook exists" in str(e):
+                        logging.info("      • YES: Orderbook not initialized")
+                    else:
+                        logging.error(f"      ❌ YES Error: {e}")
 
                 # --- EVALUATE NO ---
                 token_no = m['clobTokenIds'][1]
@@ -259,18 +378,22 @@ def main():
                         
                         if isinstance(res, tuple) and res[0] == "BUY":
                             _, bet, edge = res
-                            logging.info(f"      ✅ BUY NO: AI {prob_no:.2f} vs {ask:.2f} | Edge {edge:.1%} | Bet ${bet:.2f}")
+                            logging.info(f"      🔥 BUY NO: AI {prob_no:.2f} vs {ask:.2f} | Edge {edge:.1%} | Bet ${bet:.2f}")
                             FAKE_BALANCE -= bet
                             with open(LOG_FILE, 'a', newline='') as f:
                                 csv.writer(f).writerow([datetime.now(), m['question'], "NO", f"{prob_no:.3f}", f"{ask:.3f}", f"{edge:.3f}", f"{bet:.2f}", f"{moneyness:.3f}", f"{data['rsi']:.1f}"])
                         else:
-                            logging.info(f"      • NO:  AI {prob_no:.2f} vs {ask:.2f} -> {res}")
+                            logging.info(f"      • NO:  AI {prob_no:.2f} vs Mkt {ask:.2f} -> {res}")
                     else:
                         logging.info("      • NO:  No Sellers (Empty Book)")
-                except: pass
+                except Exception as e:
+                    if "No orderbook exists" in str(e):
+                        logging.info("      • NO:  Orderbook not initialized")
+                    else:
+                        logging.error(f"      ❌ NO Error: {e}")
             
             if scanned_count == 0:
-                logging.warning("   ⚠️ No valid price markets found in this batch (Parser rejected all).")
+                logging.warning("   ⚠️ No valid price markets found in this batch.")
 
         except Exception as e:
             logging.error(f"❌ Loop Error: {e}")

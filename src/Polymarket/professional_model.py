@@ -3,7 +3,59 @@ import xgboost as xgb
 import numpy as np
 import argparse
 import os
+import requests
 from sklearn.metrics import roc_auc_score
+
+# --- INITIALIZE SYSTEM ---
+
+# AWS credentials should be set via environment variables or AWS credentials file
+# Set these in your environment or use: export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+# Or use AWS credentials file at ~/.aws/credentials
+if not os.environ.get("AWS_ACCESS_KEY_ID"):
+    raise ValueError("AWS_ACCESS_KEY_ID environment variable not set. Please set it before running.")
+if not os.environ.get("AWS_SECRET_ACCESS_KEY"):
+    raise ValueError("AWS_SECRET_ACCESS_KEY environment variable not set. Please set it before running.")
+if not os.environ.get("AWS_DEFAULT_REGION"):
+    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+#SET Ollama model for local LLM
+import subprocess
+
+# Run Ollama Qwen 2.5:14b model for local LLM
+def ensure_model_running(model_name="qwen2.5:14b", host="http://localhost:11434"):
+    try:
+        # 1. Check currently loaded models
+        response = requests.get(f"{host}/api/ps")
+        response.raise_for_status()
+        
+        running_models = [m['name'] for m in response.json().get('models', [])]
+        
+        # Ollama sometimes returns names like 'qwen2.5:14b-instruct', so we check if our string is in there
+        if any(model_name in running for running in running_models):
+            print(f"✅ Model '{model_name}' is already running.")
+            return True
+        
+        # 2. If not running, trigger a load
+        print(f"⏳ Model '{model_name}' not loaded. Initializing...")
+        
+        # We send an empty prompt with keep_alive to force it into VRAM
+        # keep_alive: -1 keeps it running indefinitely, or use "5m" for 5 minutes
+        requests.post(f"{host}/api/generate", json={
+            "model": model_name, 
+            "prompt": "", 
+            "keep_alive": "5m" 
+        })
+        
+        print(f"🚀 Model '{model_name}' has been started.")
+        return True
+
+    except requests.exceptions.ConnectionError:
+        print("❌ Error: Could not connect to Ollama. Is the Ollama app/service running?")
+        return False
+    except Exception as e:
+        print(f"❌ An error occurred: {e}")
+        return False
+
+ensure_model_running("qwen2.5:14b")
 
 # --- ARGUMENTS ---
 parser = argparse.ArgumentParser()
