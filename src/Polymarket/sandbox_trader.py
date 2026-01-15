@@ -18,52 +18,12 @@ import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
 # --- INITIALIZE SYSTEM ---
-
-# AWS credentials should be set via environment variables or AWS credentials file
-# Set these in your environment or use: export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
-# Or use AWS credentials file at ~/.aws/credentials
-if not os.environ.get("AWS_ACCESS_KEY_ID"):
-    raise ValueError("AWS_ACCESS_KEY_ID environment variable not set. Please set it before running.")
-if not os.environ.get("AWS_SECRET_ACCESS_KEY"):
-    raise ValueError("AWS_SECRET_ACCESS_KEY environment variable not set. Please set it before running.")
-if not os.environ.get("AWS_DEFAULT_REGION"):
-    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
-
-
-# Run Ollama Qwen 2.5:14b model for local LLM
 def ensure_model_running(model_name="qwen2.5:14b", host="http://localhost:11434"):
     try:
-        # 1. Check currently loaded models
-        response = requests.get(f"{host}/api/ps")
-        response.raise_for_status()
-        
-        running_models = [m['name'] for m in response.json().get('models', [])]
-        
-        # Ollama sometimes returns names like 'qwen2.5:14b-instruct', so we check if our string is in there
-        if any(model_name in running for running in running_models):
-            print(f"✅ Model '{model_name}' is already running.")
-            return True
-        
-        # 2. If not running, trigger a load
-        print(f"⏳ Model '{model_name}' not loaded. Initializing...")
-        
-        # We send an empty prompt with keep_alive to force it into VRAM
-        # keep_alive: -1 keeps it running indefinitely, or use "5m" for 5 minutes
-        requests.post(f"{host}/api/generate", json={
-            "model": model_name, 
-            "prompt": "", 
-            "keep_alive": "5m" 
-        })
-        
-        print(f"🚀 Model '{model_name}' has been started.")
+        requests.get(f"{host}/api/ps")
+        requests.post(f"{host}/api/generate", json={"model": model_name, "prompt": "", "keep_alive": "5m"})
         return True
-
-    except requests.exceptions.ConnectionError:
-        print("❌ Error: Could not connect to Ollama. Is the Ollama app/service running?")
-        return False
-    except Exception as e:
-        print(f"❌ An error occurred: {e}")
-        return False
+    except: return False
 
 ensure_model_running("qwen2.5:14b")
 
@@ -87,10 +47,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
     datefmt='%H:%M:%S',
-    handlers=[
-        logging.FileHandler(log_file),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler(log_file), logging.StreamHandler()]
 )
 
 # --- CONFIG ---
@@ -102,11 +59,6 @@ ASSET_MAP = {
 }
 CONFIG = ASSET_MAP[CURRENT_ASSET]
 
-# Specific Tag IDs for deep scanning
-# 21 = Crypto (General)
-# 235 = Bitcoin, 620 = Bitcoin (Alt tag)
-# 157 = Ethereum
-# 455 = Solana
 ASSET_TAGS_MAP = {
     "BTC": ["21", "235", "620"],
     "ETH": ["21", "157"],
@@ -119,17 +71,20 @@ MODEL_PREFIX = os.path.join(DATA_DIR, f"model_{CURRENT_ASSET}_")
 LOG_FILE = f"trades_{CURRENT_ASSET}.csv"
 PENDING_DIR = os.path.join(DATA_DIR, "available_markets")
 
-if not os.path.exists(PENDING_DIR):
-    os.makedirs(PENDING_DIR)
+if not os.path.exists(PENDING_DIR): os.makedirs(PENDING_DIR)
 
 NUM_MODELS = 5
 HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137
 FAKE_BALANCE = 5000.00
 MAX_SPREAD_CENTS = 0.08
+
+# --- STRATEGY FILTERS ---
 MIN_EDGE = 0.10 
 MIN_BET = 5.00
-MIN_LIQUIDITY = 5000.00  # Only look at markets with > $5,000 liquidity
+MIN_LIQUIDITY = 5000.00
+MIN_ODDS = 0.01  # Skip if price < 1 cent
+MAX_ODDS = 0.90  # Skip if price > 90 cents
 
 try: nltk.download('vader_lexicon', quiet=True)
 except: pass
@@ -194,38 +149,49 @@ def init_log():
         with open(LOG_FILE, 'w', newline='') as f:
             csv.writer(f).writerow(["Timestamp", "Question", "Side", "AI_Prob", "Price", "Edge", "Bet", "Moneyness", "RSI"])
 
-def save_pending_opportunity(market, parsed_info):
-    """Saves market to disk when we don't have money"""
-    # Use conditionId as filename to ensure uniqueness
-    filename = os.path.join(PENDING_DIR, f"{market['conditionId']}.json")
-    data = {
-        "market": market,
-        "parsed": parsed_info,
-        "saved_at": datetime.now().isoformat()
-    }
-    with open(filename, 'w') as f:
-        json.dump(data, f)
-    logging.info(f"      💾 Saved opportunity to disk (Low Balance).")
+def parse_group_title(title):
+    try:
+        title = title.lower().replace(",","").replace("$","").strip()
+        if "-" in title:
+            parts = title.split("-")
+            low = float(parts[0].strip())
+            high = float(parts[1].strip())
+            return (low + high) / 2, 0 
+        if "<" in title:
+            val = float(title.replace("<","").strip())
+            return val, -1 
+        if ">" in title:
+            val = float(title.replace(">","").strip())
+            return val, 1 
+    except: pass
+    return None, None
 
-# --- UPDATED EVALUATE SIDE (Includes Reference Price Logic) ---
-def evaluate_side(side_name, ai_prob, market_price, ref_price, balance, question_text):
-    # Detect Dead Book: If Ask is > 0.98 but Reference Price is < 0.90, it's illiquid junk.
+def evaluate_side(side_name, ai_prob, market_price, ref_price, balance):
+    # 1. Dead Book Check
     if market_price > 0.98 and ref_price < 0.90:
-        return f"SKIP (Dead Book: Ask {market_price:.2f} vs Ref {ref_price:.3f})"
+        return f"SKIP (Dead Book (no real liquidity): Ask {market_price:.2f} vs Ref {ref_price:.3f})"
+    
+    # 2. Extreme Odds Filter (This is what you asked for!)
+    if market_price < MIN_ODDS:
+        return f"SKIP (Odds < {MIN_ODDS:.0%}: {market_price:.1%} - Too unlikely / Dead / Liquidity Dust)"
+    if market_price > MAX_ODDS:
+        return f"SKIP (Odds > {MAX_ODDS:.0%}: {market_price:.1%} - Too expensive / Upside is too small)"
 
+    # 3. Edge Calculation
     edge = ai_prob - market_price
     if edge <= 0: return f"SKIP (Neg Edge {edge:.1%})"
-    if edge < MIN_EDGE: return f"SKIP (Edge {edge:.1%} < {MIN_EDGE:.0%})"
+    if edge < MIN_EDGE: return f"SKIP (Low Edge {edge:.1%})"
+    
+    # 4. Bet Sizing
     bet = calculate_kelly_bet(balance, ai_prob, market_price)
-    # Return numerical bet even if it's 0, handled by caller
+    if bet < MIN_BET: return f"SKIP (Bet ${bet:.2f} < Min)"
+    
     return "BUY", bet, edge
 
-# --- CORE ANALYSIS FUNCTION ---
-# This is extracted so we can use it for both Live and Saved markets
-def analyze_single_market(m, parsed, data, models, client, global_balance):
+# --- ANALYSIS ENGINE ---
+def analyze_single_market_logic(m, parsed, data, models, client, global_balance):
     """
     Returns: (Action, Bet, Side, DetailsDict)
-    Action: "EXECUTE", "SAVE", "SKIP"
     """
     # Log to both file and console
     log_msg = f"🔍 Analyzing market: {m['question']}"
@@ -233,26 +199,12 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
     
     try:
         liquidity_val = float(m.get('liquidity', 0))
-        market_liquidity_str = f"Market Liquidity: ${liquidity_val:,.0f}"
-    except Exception:
-        market_liquidity_str = f"Market Liquidity: {m.get('liquidity', 0)}"
-
-    try:
-        end_date = m.get('endDate')
-        end_dt = pd.to_datetime(end_date).replace(tzinfo=None)
-        hours = (end_dt - datetime.now()).total_seconds() / 3600
-        days_left = max(0.1, hours / 24.0)
-        market_end_date_str = f"Market End Date: {days_left:.1f} days left\n\n"
-    except Exception:
-        market_end_date_str = f"Market End Date: {m.get('endDate')}\n\n"
-
-    logging.info(market_liquidity_str)
-    logging.info(market_end_date_str)
+        logging.info(f"Market Liquidity: ${liquidity_val:,.0f}")
+    except: pass
 
     # 1. Build Features
     target = parsed['target_price']
     direction = parsed.get('direction', 1)
-    
     if target == "CURRENT_PRICE": target = data['price']
     
     if direction == 1: moneyness = np.log(data['price'] / target)
@@ -260,154 +212,162 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
     else: moneyness = -abs(np.log(data['price'] / target))
     
     try:
-        end_date = m.get('endDate')
-        end_dt = pd.to_datetime(end_date).replace(tzinfo=None)
+        end_dt = pd.to_datetime(m.get('endDate')).replace(tzinfo=None)
         hours = (end_dt - datetime.now()).total_seconds() / 3600
         days_left = max(0.1, hours / 24.0)
     except: 
-        return "SKIP", 0, None, "Date Error"
+        result = {"valid": False, "reason": "Date Error"}
+        return result
 
     features = pd.DataFrame([{
-        'moneyness': moneyness,
-        'days_left': days_left,
-        'vol': data['vol'],
-        'rsi': data['rsi'],
-        'trend': data['trend'],
-        'btc_mom': data['btc_mom'],
-        'qqq_mom': data['qqq_mom']
+        'moneyness': moneyness, 'days_left': days_left, 'vol': data['vol'],
+        'rsi': data['rsi'], 'trend': data['trend'],
+        'btc_mom': data['btc_mom'], 'qqq_mom': data['qqq_mom']
     }])
 
-    # 2. AI Vote
+    # 2. AI Prediction
     votes = [mod.predict_proba(features)[0][1] for mod in models]
     prob_yes = sum(votes) / len(votes)
     prob_no = 1.0 - prob_yes
+    
+    result = {
+        "valid": True, 
+        "outcome_label": m.get('groupItemTitle', 'Unknown'),
+        "prob_yes": prob_yes, "prob_no": prob_no,
+        "ask_yes": 0, "ask_no": 0,
+        "edge_yes": 0, "edge_no": 0,
+        "action": "SKIP", "reason": "",
+        "token_yes": None, "token_no": None
+    }
 
-    # 3. Check Order Book
+    # 3. Order Book Fetch
     try:
-        # Handle cases where tokens might be stored differently
         tokens = m.get('clobTokenIds')
         if isinstance(tokens, str): tokens = json.loads(tokens)
-        
         if not tokens or len(tokens) < 2:
-            return "SKIP", 0, None, "No Tokens"
-            
-        token_yes = tokens[0]
-        token_no = tokens[1]
-    except: return "SKIP", 0, None, "Token Parse Error"
+            result["reason"] = "No Tokens"
+            return result
+        
+        result["token_yes"] = tokens[0]
+        result["token_no"] = tokens[1]
 
-    # --- GET REFERENCE PRICES FOR DEAD BOOK CHECK ---
-    try:
-        raw_ops = m.get('outcomePrices')
-        if isinstance(raw_ops, str): ops = json.loads(raw_ops)
-        else: ops = raw_ops
-        ref_yes = float(ops[0])
-        ref_no = float(ops[1])
-    except:
-        ref_yes = 0.0
-        ref_no = 0.0
+        # Get Prices
+        try:
+            ob_yes = client.get_order_book(tokens[0])
+            result["ask_yes"] = float(ob_yes.asks[0].price) if ob_yes.asks else 0.0
+        except: pass
+        
+        try:
+            ob_no = client.get_order_book(tokens[1])
+            result["ask_no"] = float(ob_no.asks[0].price) if ob_no.asks else 0.0
+        except: pass
 
-    # Track reasons for rejection if we don't buy
-    yes_status = "No Ask Found"
-    no_status = "No Ask Found"
+        # Get Reference for Dead Book check
+        try:
+            raw_ops = m.get('outcomePrices')
+            if isinstance(raw_ops, str): ops = json.loads(raw_ops)
+            else: ops = raw_ops
+            ref_yes = float(ops[0])
+            ref_no = float(ops[1])
+        except: ref_yes, ref_no = 0.0, 0.0
 
-    # --- EVALUATE YES ---
-    try:
-        ob_yes = client.get_order_book(token_yes)
-        if ob_yes.asks:
-            ask_yes = float(ob_yes.asks[0].price)
-            res = evaluate_side("YES", prob_yes, ask_yes, ref_yes, global_balance, m['question'])
-            
-            # If Buy
-            if isinstance(res, tuple) and res[0] == "BUY":
-                action, bet, edge = res
-                details = {"side": "YES", "prob": prob_yes, "price": ask_yes, "edge": edge, "bet": bet, "rsi": data['rsi'], "moneyness": moneyness}
-                
-                if bet > MIN_BET:
-                    return "EXECUTE", bet, "YES", details
-                else:
-                    if global_balance < MIN_BET:
-                        return "SAVE", 0, "YES", details
-                    return "SKIP", 0, "YES", "Bet too small (Kelly)"
-            
-            # If Skip, save specific reason
-            yes_status = f"AI:{prob_yes:.2f}/Mkt:{ask_yes:.2f} (Ref:{ref_yes:.3f}) -> {res}"
-            
-    except Exception as e:
-        if "No orderbook" in str(e): yes_status = "No Orderbook"
-        else: logging.error(f"Error YES OB: {e}")
+        # Calc Edges (For table display)
+        if result["ask_yes"] > 0: result["edge_yes"] = prob_yes - result["ask_yes"]
+        if result["ask_no"] > 0: result["edge_no"] = prob_no - result["ask_no"]
 
-    # --- EVALUATE NO ---
-    try:
-        ob_no = client.get_order_book(token_no)
-        if ob_no.asks:
-            ask_no = float(ob_no.asks[0].price)
-            res = evaluate_side("NO", prob_no, ask_no, ref_no, global_balance, m['question'])
-            
-            # If Buy
-            if isinstance(res, tuple) and res[0] == "BUY":
-                action, bet, edge = res
-                details = {"side": "NO", "prob": prob_no, "price": ask_no, "edge": edge, "bet": bet, "rsi": data['rsi'], "moneyness": moneyness}
-                
-                if bet > MIN_BET:
-                    return "EXECUTE", bet, "NO", details
-                else:
-                    if global_balance < MIN_BET:
-                        return "SAVE", 0, "NO", details
-                    return "SKIP", 0, "NO", "Bet too small (Kelly)"
-            
-            # If Skip, save specific reason
-            no_status = f"AI:{prob_no:.2f}/Mkt:{ask_no:.2f} (Ref:{ref_no:.3f}) -> {res}"
+        # Decisions
+        res_yes = evaluate_side("YES", prob_yes, result["ask_yes"], ref_yes, global_balance)
+        res_no = evaluate_side("NO", prob_no, result["ask_no"], ref_no, global_balance)
+
+        if isinstance(res_yes, tuple) and res_yes[0] == "BUY":
+            result["action"] = "BUY YES"
+        elif isinstance(res_no, tuple) and res_no[0] == "BUY":
+            result["action"] = "BUY NO"
+        else:
+            # FIX: Do NOT strip the reason text. Show full details.
+            # Example: YES: SKIP (Odds > 90%: 99.0%)
+            result["reason"] = f"YES: {res_yes} | NO: {res_no}"
 
     except Exception as e:
-        if "No orderbook" in str(e): no_status = "No Orderbook"
-        else: logging.error(f"Error NO OB: {e}")
+        result["reason"] = f"Error: {e}"
 
-    # If we reached here, neither side was a buy. Return detailed reasons.
-    detailed_reason = f"No Edge. YES[{yes_status}] | NO[{no_status}]"
-    return "SKIP", 0, None, detailed_reason
+    return result
+
+# --- VISUALIZATION HELPER ---
+def print_event_table(event_title, end_date, btc_price, asset_vol, rows):
+    logging.info("\n" + "=" * 130)
+    logging.info(f"📅 EVENT: {event_title}")
+    logging.info(f"   End: {end_date} | BTC: ${btc_price:,.2f} | Asset Volatility: {asset_vol:.4f}")
+    logging.info("-" * 130)
+    
+    logging.info(f"{'Outcome':<20} | {'AI Prob (Y/N)':<15} | {'Cost (Y/N)':<15} | {'Edge (Y/N)':<18} | {'Action':<50}")
+    logging.info("-" * 130)
+    
+    for r in rows:
+        outcome = r['outcome_label'][:20]
+        ai_prob = f"{r['prob_yes']:.0%} / {r['prob_no']:.0%}"
+        
+        cost_y = f"{r['ask_yes']:.2f}" if r['ask_yes'] > 0 else "-"
+        cost_n = f"{r['ask_no']:.2f}" if r['ask_no'] > 0 else "-"
+        cost_str = f"{cost_y} / {cost_n}"
+        
+        edge_y = f"{r['edge_yes']:.1%}" if r['edge_yes'] != 0 else "-"
+        edge_n = f"{r['edge_no']:.1%}" if r['edge_no'] != 0 else "-"
+        edge_str = f"{edge_y} / {edge_n}"
+        
+        action = r['action']
+        if action == "SKIP":
+            # Show the reason, but truncate if it's too huge for the table
+            reason = r['reason']
+            # We already print the full reason in the log block above, so table can be succinct
+            # But user requested "details about action", so we try to fit it.
+            action = f"SKIP" 
+        
+        if "BUY" in action:
+             action = f"🔥 {action}"
+        
+        logging.info(f"{outcome:<20} | {ai_prob:<15} | {cost_str:<15} | {edge_str:<18} | {action:<50}")
+    
+    logging.info("=" * 130 + "\n")
+
+def save_pending_opportunity(market, parsed_info):
+    filename = os.path.join(PENDING_DIR, f"{market['conditionId']}.json")
+    data = {"market": market, "parsed": parsed_info, "saved_at": datetime.now().isoformat()}
+    with open(filename, 'w') as f: json.dump(data, f)
+    logging.info(f"      💾 Saved opportunity to disk (Low Balance).")
 
 def process_pending_markets(client, models, live_data):
-    """
-    Checks the 'available_markets' folder. Re-analyzes files.
-    If traded, delete file. If expired/bad, delete file.
-    """
     global FAKE_BALANCE
     files = glob.glob(os.path.join(PENDING_DIR, "*.json"))
-    
     if not files: return
     
     logging.info(f"📂 Checking {len(files)} saved pending markets...")
-    
     for filepath in files:
-        if FAKE_BALANCE < MIN_BET:
-            break # Still broke, stop checking
-            
+        if FAKE_BALANCE < MIN_BET: break 
         try:
-            with open(filepath, 'r') as f:
-                saved_data = json.load(f)
-            
+            with open(filepath, 'r') as f: saved_data = json.load(f)
             m = saved_data['market']
             parsed = saved_data['parsed']
             
-            # Re-Run Analysis
-            action, bet, side, details = analyze_single_market(m, parsed, live_data, models, client, FAKE_BALANCE)
+            res = analyze_single_market_logic(m, parsed, live_data, models, client, FAKE_BALANCE)
             
-            if action == "EXECUTE":
-                logging.info(f"   🔥 [SAVED] EXECUTING {side}: {m['question'][:40]}...")
-                FAKE_BALANCE -= bet
-                with open(LOG_FILE, 'a', newline='') as f:
-                    csv.writer(f).writerow([datetime.now(), m['question'], side, 
-                                            f"{details['prob']:.3f}", f"{details['price']:.3f}", 
-                                            f"{details['edge']:.3f}", f"{bet:.2f}", 
-                                            f"{details['moneyness']:.3f}", f"{details['rsi']:.1f}"])
-                # Trade done, delete file
+            if "BUY" in res["action"]:
+                side = "YES" if "YES" in res["action"] else "NO"
+                prob = res["prob_yes"] if side == "YES" else res["prob_no"]
+                ask = res["ask_yes"] if side == "YES" else res["ask_no"]
+                bet = calculate_kelly_bet(FAKE_BALANCE, prob, ask)
+                if bet > MIN_BET:
+                    logging.info(f"   🔥 [SAVED] EXECUTING {side}: {m['question'][:40]}...")
+                    FAKE_BALANCE -= bet
+                    with open(LOG_FILE, 'a', newline='') as f:
+                        csv.writer(f).writerow([datetime.now(), m['question'], side, 
+                                                f"{prob:.3f}", f"{ask:.3f}", 
+                                                f"{res['edge_yes' if side=='YES' else 'edge_no']:.3f}", f"{bet:.2f}", 
+                                                0, 0])
+                    os.remove(filepath)
+            elif res["action"] == "SKIP" and ("Dead Book" in res["reason"] or "Odds" in res["reason"]):
                 os.remove(filepath)
-            
-            elif action == "SKIP":
-                os.remove(filepath)
-                
-        except Exception as e:
-            logging.error(f"Error processing saved file {filepath}: {e}")
+        except: 
             try: os.remove(filepath)
             except: pass
 
@@ -433,9 +393,7 @@ def main():
 
     while True:
         try:
-            logging.info(f"\n--- STARTING CYCLE [Bal: ${FAKE_BALANCE:,.2f}] ---")
-            
-            # 1. Get Live Data Once per Cycle
+            logging.info(f"\n--- SCANNING [Bal: ${FAKE_BALANCE:,.2f}] ---")
             data = get_live_market_data()
             if not data: 
                 logging.warning("⚠️ Waiting for Yahoo Finance data...")
@@ -443,108 +401,132 @@ def main():
             
             logging.info(f"BTC Price: ${data['price']:,.2f} | RSI: {data['rsi']:.1f}")
 
-            # 2. Check Pending Markets First (If we have money)
-            if FAKE_BALANCE > MIN_BET:
-                process_pending_markets(client, models, data)
+            if FAKE_BALANCE > MIN_BET: process_pending_markets(client, models, data)
 
-            total_markets_found = 0
+            total_events_scanned = 0
 
-            # 3. Iterate Tags
             for tag_id in TARGET_TAGS:
                 offset = 0
-                logging.info(f"👉 Scanning Tag {tag_id}...")
-                
-                while True: # Pagination Loop
-                    # Fetch
+                while True:
                     search_q = CONFIG['keywords'][0]
-                    url = f"https://gamma-api.polymarket.com/markets"
+                    url = f"https://gamma-api.polymarket.com/events"
                     params = {
                         "active": "true", "closed": "false",
-                        "tag_id": tag_id,
-                        "q": search_q,
-                        "order": "liquidity", # <--- Sort by Liquidity to find good markets first
-                        "ascending": "false",
-                        "limit": 50, "offset": offset
+                        "tag_id": tag_id, "q": search_q,
+                        "order": "volume", "ascending": "false",
+                        "limit": 10, "offset": offset 
                     }
                     
                     resp = requests.get(url, params=params).json()
+                    if not isinstance(resp, list) or len(resp) == 0: break 
                     
-                    if not isinstance(resp, list) or len(resp) == 0:
-                        break # End of this tag
-                    
-                    total_markets_found += len(resp)
-                    
-                    for m in resp:
-                        q_text = m.get('question', '')
+                    for event in resp:
+                        total_events_scanned += 1
+                        event_rows = []
+                        valid_event_markets = False
                         
-                        # Filter 0: Liquidity
-                        try:
-                            liq = float(m.get('liquidity', 0))
-                            if liq < MIN_LIQUIDITY:
-                                logging.info(f"   [SKIP] Low Liquidity: ${liq:,.0f} for market: {q_text}")
+                        if not any(k.lower() in event['title'].lower() for k in CONFIG['keywords']):
+                            continue
+                        
+                        logging.info("\n\n================================================================================================\n\n")
+                        logging.info(f"\n\n🔎 EVENT: {event.get('title', 'Unknown')}\n\n")
+                        markets = event.get('markets', [])
+                        
+                        for m in markets:
+                            q_text = m.get('question', '')
+                            
+                            try:
+                                liq = float(m.get('liquidity', 0))
+                                if liq < MIN_LIQUIDITY: 
+                                    logging.info(f"   ❌ SKIP MARKET: Low Liquidity (${liq:,.0f}) - {q_text}")
+                                    continue
+                            except: continue
+
+                            if not any(k.lower() in q_text.lower() for k in CONFIG['keywords']):
+                                logging.info(f"   ❌ SKIP MARKET: Keyword Mismatch - {q_text}")
                                 continue
-                        except Exception as e: 
-                            continue
+                            
+                            try:
+                                raw_outcomes = m.get('outcomes')
+                                if isinstance(raw_outcomes, str): outcomes = json.loads(raw_outcomes)
+                                else: outcomes = raw_outcomes
+                                if not outcomes: continue
+                                out_set = set(str(o).strip().lower() for o in outcomes)
+                                valid_pairs = [{'yes', 'no'}, {'up', 'down'}, {'true', 'false'}]
+                                if not any(out_set == pair for pair in valid_pairs): 
+                                    logging.info(f"   ❌ SKIP MARKET: Invalid Outcomes {outcomes} - {q_text}")
+                                    continue
+                            except: continue
 
-                        # Filter 1: Keyword
-                        if not any(k.lower() in q_text.lower() for k in CONFIG['keywords']):
-                            continue
-                        
-                        # Filter 2: Validate Outcomes
-                        try:
-                            raw_outcomes = m.get('outcomes')
-                            if isinstance(raw_outcomes, str): outcomes = json.loads(raw_outcomes)
-                            else: outcomes = raw_outcomes
-                            if not outcomes: continue
-                            out_set = set(str(o).strip().lower() for o in outcomes)
-                            valid_pairs = [{'yes', 'no'}, {'up', 'down'}, {'true', 'false'}]
-                            if not any(out_set == pair for pair in valid_pairs):
-                                logging.info(f"   [SKIP] Bad Outcomes: {outcomes} for market: {q_text}")
+                            parsed = llm_parser.parse_question(q_text)
+                            if not parsed or not isinstance(parsed.get('target_price'), (int, float)):
+                                group_title = m.get('groupItemTitle', '')
+                                if group_title:
+                                    t_price, direction = parse_group_title(group_title)
+                                    if t_price is not None:
+                                        parsed = {"asset": CURRENT_ASSET, "target_price": t_price, "direction": direction}
+
+                            if not parsed or parsed.get('asset') != CURRENT_ASSET: 
+                                logging.info(f"   ❌ SKIP MARKET: Parser Rejected - {q_text}")
                                 continue
-                        except: continue
+                            
+                            if not isinstance(parsed['target_price'], (int, float)) and parsed['target_price'] != "CURRENT_PRICE": 
+                                logging.info(f"   ❌ SKIP MARKET: Invalid Target - {q_text}")
+                                continue
 
-                        # Filter 3: Parser
-                        parsed = llm_parser.parse_question(q_text)
-                        if not parsed or parsed['asset'] != CURRENT_ASSET:
-                            continue
-                        
-                        if not isinstance(parsed['target_price'], (int, float)) and parsed['target_price'] != "CURRENT_PRICE":
-                            continue
+                            # Analyze
+                            row_result = analyze_single_market_logic(m, parsed, data, models, client, FAKE_BALANCE)
+                            
+                            if row_result["valid"]:
+                                event_rows.append(row_result)
+                                valid_event_markets = True
+                                
+                                # IMMEDIATE LOGGING (As requested)
+                                if "BUY" in row_result["action"]:
+                                     logging.info(f"      ✅ DECISION: {row_result['action']}")
+                                else:
+                                     logging.info(f"      🛑 DECISION: {row_result['reason']}")
 
-                        # Analyze
-                        action, bet, side, details = analyze_single_market(m, parsed, data, models, client, FAKE_BALANCE)
-                        
-                        if action == "EXECUTE":
-                            logging.info(f"   🔥 BUY {side}: {q_text[:40]}... (Edge {details['edge']:.1%})")
-                            FAKE_BALANCE -= bet
-                            with open(LOG_FILE, 'a', newline='') as f:
-                                csv.writer(f).writerow([datetime.now(), m['question'], side, 
-                                                        f"{details['prob']:.3f}", f"{details['price']:.3f}", 
-                                                        f"{details['edge']:.3f}", f"{bet:.2f}", 
-                                                        f"{details['moneyness']:.3f}", f"{details['rsi']:.1f}"])
-                        
-                        elif action == "SAVE":
-                            save_pending_opportunity(m, parsed)
-                        
-                        elif action == "SKIP":
-                            if "Orderbook" not in str(details) and "Token" not in str(details):
-                                logging.info(f"   [SKIP] {q_text[:40]}... Reason: {details}")
+                                # EXECUTION
+                                if "BUY" in row_result["action"]:
+                                    side = "YES" if "YES" in row_result["action"] else "NO"
+                                    prob = row_result["prob_yes"] if side == "YES" else row_result["prob_no"]
+                                    ask = row_result["ask_yes"] if side == "YES" else row_result["ask_no"]
+                                    bet = calculate_kelly_bet(FAKE_BALANCE, prob, ask)
+                                    
+                                    if bet > MIN_BET:
+                                        FAKE_BALANCE -= bet
+                                        print(f"💰 EXECUTING TRADE: {side} on {row_result['outcome_label']} (${bet:.2f})")
+                                        with open(LOG_FILE, 'a', newline='') as f:
+                                            csv.writer(f).writerow([datetime.now(), m['question'], side, 
+                                                                    f"{prob:.3f}", f"{ask:.3f}", 
+                                                                    f"{row_result['edge_yes']:.3f}", f"{bet:.2f}", 
+                                                                    0, 0])
+                                    elif FAKE_BALANCE < MIN_BET:
+                                        save_pending_opportunity(m, parsed)
+                            else:
+                                logging.info(f"   ❌ SKIP MARKET: Logic Invalid ({row_result['reason']}) - {q_text}")
 
-                    # Pagination increment
-                    offset += 50
-                    time.sleep(0.2) # Small delay between pages
+                        # PRINT TABLE
+                        if valid_event_markets:
+                            print_event_table(event['title'], event.get('endDate', 'N/A')[:10], data['price'], data['vol'], event_rows)
+                        else:
+                            logging.info("   ℹ️ No valid price markets found in this event.")
+
+                    offset += 10
+                    time.sleep(0.5)
             
-            # 4. End of Cycle Logic
-            if total_markets_found == 0:
-                logging.info("💤 No markets found in any tag. Sleeping 60s.")
+            if total_events_scanned == 0:
+                logging.info("💤 No active events found. Sleeping 60s.")
                 time.sleep(60)
             else:
                 logging.info("🔄 Cycle complete. Restarting immediately...")
                 time.sleep(1)
 
         except Exception as e:
-            logging.error(f"❌ Critical Loop Error: {e}")
-            time.sleep(10)
+            logging.error(f"Error: {e}")
+        
+        time.sleep(60)
 
 if __name__ == "__main__":
     main()
