@@ -92,7 +92,7 @@ class MarketParser:
         """
         Calls local Qwen model via Ollama.
         """
-        print(f"   💻 [LOCAL Qwen] Analyzing...")
+        print(f"   💻 [LOCAL Qwen] Analyzing market {question}...")
         payload = {
             "model": LOCAL_MODEL_NAME,
             "prompt": self._construct_prompt(question),

@@ -79,6 +79,7 @@ FAKE_BALANCE = 5000.00
 MAX_SPREAD_CENTS = 0.08
 MIN_EDGE = 0.10 
 MIN_BET = 5.00
+MIN_LIQUIDITY = 5000.00  # Only look at markets with > $5,000 liquidity
 
 try: nltk.download('vader_lexicon', quiet=True)
 except: pass
@@ -171,8 +172,28 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
     Returns: (Action, Bet, Side, DetailsDict)
     Action: "EXECUTE", "SAVE", "SKIP"
     """
-    logging.info(f"🔍 Analyzing market: {m['question']}")
+    # Log to both file and console
+    log_msg = f"🔍 Analyzing market: {m['question']}"
+    logging.info("\n" + "=" * len(log_msg) + "\n" + log_msg + "\n" + "=" * len(log_msg) + "\n") 
     
+    try:
+        liquidity_val = float(m.get('liquidity', 0))
+        market_liquidity_str = f"Market Liquidity: ${liquidity_val:,.0f}"
+    except Exception:
+        market_liquidity_str = f"Market Liquidity: {m.get('liquidity', 0)}"
+
+    try:
+        end_date = m.get('endDate')
+        end_dt = pd.to_datetime(end_date).replace(tzinfo=None)
+        hours = (end_dt - datetime.now()).total_seconds() / 3600
+        days_left = max(0.1, hours / 24.0)
+        market_end_date_str = f"Market End Date: {days_left} days left\n\n"
+    except Exception:
+        market_end_date_str = f"Market End Date: {m.get('endDate')}\n\n"
+
+    logging.info(market_liquidity_str)
+    logging.info(market_end_date_str)
+
     # 1. Build Features
     target = parsed['target_price']
     direction = parsed.get('direction', 1)
@@ -184,7 +205,6 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
     else: moneyness = -abs(np.log(data['price'] / target))
     
     try:
-        # If market object structure differs (saved vs live), handle it
         end_date = m.get('endDate')
         end_dt = pd.to_datetime(end_date).replace(tzinfo=None)
         hours = (end_dt - datetime.now()).total_seconds() / 3600
@@ -208,9 +228,7 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
     prob_no = 1.0 - prob_yes
 
     # 3. Check Order Book
-    # We need to re-fetch tokens from API or use cached ones
     try:
-        # Handle cases where tokens might be stored differently
         tokens = m.get('clobTokenIds')
         if isinstance(tokens, str): tokens = json.loads(tokens)
         
@@ -221,12 +239,18 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
         token_no = tokens[1]
     except: return "SKIP", 0, None, "Token Parse Error"
 
+    # Track reasons for rejection if we don't buy
+    yes_status = "No Ask Found"
+    no_status = "No Ask Found"
+
     # --- EVALUATE YES ---
     try:
         ob_yes = client.get_order_book(token_yes)
         if ob_yes.asks:
             ask_yes = float(ob_yes.asks[0].price)
             res = evaluate_side("YES", prob_yes, ask_yes, global_balance, m['question'])
+            
+            # If Buy
             if isinstance(res, tuple) and res[0] == "BUY":
                 action, bet, edge = res
                 details = {"side": "YES", "prob": prob_yes, "price": ask_yes, "edge": edge, "bet": bet, "rsi": data['rsi'], "moneyness": moneyness}
@@ -234,13 +258,15 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
                 if bet > MIN_BET:
                     return "EXECUTE", bet, "YES", details
                 else:
-                    # Logic: We found an edge, but have no money.
-                    # Only save if edge is good but balance is the bottleneck
                     if global_balance < MIN_BET:
                         return "SAVE", 0, "YES", details
                     return "SKIP", 0, "YES", "Bet too small (Kelly)"
+            
+            # If Skip, save specific reason (res is the skip string)
+            yes_status = f"AI:{prob_yes:.2f}/Mkt:{ask_yes:.2f} -> {res}"
+            
     except Exception as e:
-        if "No orderbook" in str(e): pass
+        if "No orderbook" in str(e): yes_status = "No Orderbook"
         else: logging.error(f"Error YES OB: {e}")
 
     # --- EVALUATE NO ---
@@ -249,6 +275,8 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
         if ob_no.asks:
             ask_no = float(ob_no.asks[0].price)
             res = evaluate_side("NO", prob_no, ask_no, global_balance, m['question'])
+            
+            # If Buy
             if isinstance(res, tuple) and res[0] == "BUY":
                 action, bet, edge = res
                 details = {"side": "NO", "prob": prob_no, "price": ask_no, "edge": edge, "bet": bet, "rsi": data['rsi'], "moneyness": moneyness}
@@ -259,11 +287,17 @@ def analyze_single_market(m, parsed, data, models, client, global_balance):
                     if global_balance < MIN_BET:
                         return "SAVE", 0, "NO", details
                     return "SKIP", 0, "NO", "Bet too small (Kelly)"
+            
+            # If Skip, save specific reason
+            no_status = f"AI:{prob_no:.2f}/Mkt:{ask_no:.2f} -> {res}"
+
     except Exception as e:
-        if "No orderbook" in str(e): pass
+        if "No orderbook" in str(e): no_status = "No Orderbook"
         else: logging.error(f"Error NO OB: {e}")
 
-    return "SKIP", 0, None, "No Edge Found"
+    # If we reached here, neither side was a buy. Return detailed reasons.
+    detailed_reason = f"No Edge. YES[{yes_status}] | NO[{no_status}]"
+    return "SKIP", 0, None, detailed_reason
 
 def process_pending_markets(client, models, live_data):
     """
@@ -361,10 +395,14 @@ def main():
                     search_q = CONFIG['keywords'][0]
                     url = f"https://gamma-api.polymarket.com/markets"
                     params = {
-                        "active": "true", "closed": "false",
+                        "active": "true",
+                        "closed": "false",
                         "tag_id": tag_id,
                         "q": search_q,
-                        "limit": 50, "offset": offset
+                        "order": "liquidity", # <--- Sort by Liquidity
+                        "ascending": "false", # <--- Highest first
+                        "limit": 50, 
+                        "offset": offset
                     }
                     
                     resp = requests.get(url, params=params).json()
@@ -377,6 +415,18 @@ def main():
                     for m in resp:
                         q_text = m.get('question', '')
                         
+                        # --- FILTER 0: LIQUIDITY CHECK ---
+                        try:
+                            liq = float(m.get('liquidity', 0))
+                            if liq < MIN_LIQUIDITY:
+                                logging.info(f"   [SKIP] Low Liquidity: ${liq:,.0f} for market: {q_text} (Min allowed liquidity: ${MIN_LIQUIDITY:,.0f})")
+                                continue
+                        except Exception as e: 
+                            logging.info(f"   [SKIP] Could not parse liquidity: {m.get('liquidity')} ({e}) for market: {q_text}")
+                            continue
+
+                        q_text = m.get('question', '')
+
                         # Filter 1: Keyword
                         if not any(k.lower() in q_text.lower() for k in CONFIG['keywords']):
                             continue
