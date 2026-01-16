@@ -78,13 +78,11 @@ HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137
 FAKE_BALANCE = 5000.00
 MAX_SPREAD_CENTS = 0.08
-
-# --- STRATEGY FILTERS ---
 MIN_EDGE = 0.10 
 MIN_BET = 5.00
 MIN_LIQUIDITY = 5000.00
-MIN_ODDS = 0.01  # Skip if price < 1 cent
-MAX_ODDS = 0.90  # Skip if price > 90 cents
+MIN_ODDS = 0.01  
+MAX_ODDS = 0.90  
 
 try: nltk.download('vader_lexicon', quiet=True)
 except: pass
@@ -169,9 +167,9 @@ def parse_group_title(title):
 def evaluate_side(side_name, ai_prob, market_price, ref_price, balance):
     # 1. Dead Book Check
     if market_price > 0.98 and ref_price < 0.90:
-        return f"SKIP (Dead Book (no real liquidity): Ask {market_price:.2f} vs Ref {ref_price:.3f})"
+        return f"SKIP (Dead Book: Ask {market_price:.2f} vs Ref {ref_price:.3f} - No real liquidity)"
     
-    # 2. Extreme Odds Filter (This is what you asked for!)
+    # 2. Extreme Odds Filter
     if market_price < MIN_ODDS:
         return f"SKIP (Odds < {MIN_ODDS:.0%}: {market_price:.1%} - Too unlikely / Dead / Liquidity Dust)"
     if market_price > MAX_ODDS:
@@ -202,7 +200,7 @@ def analyze_single_market_logic(m, parsed, data, models, client, global_balance)
         logging.info(f"Market Liquidity: ${liquidity_val:,.0f}")
     except: pass
 
-    # 1. Build Features
+    # 1. Features
     target = parsed['target_price']
     direction = parsed.get('direction', 1)
     if target == "CURRENT_PRICE": target = data['price']
@@ -284,8 +282,7 @@ def analyze_single_market_logic(m, parsed, data, models, client, global_balance)
         elif isinstance(res_no, tuple) and res_no[0] == "BUY":
             result["action"] = "BUY NO"
         else:
-            # FIX: Do NOT strip the reason text. Show full details.
-            # Example: YES: SKIP (Odds > 90%: 99.0%)
+            # KEEP FULL DETAIL FOR LOGGING, SHORTENER HANDLES TABLE
             result["reason"] = f"YES: {res_yes} | NO: {res_no}"
 
     except Exception as e:
@@ -294,12 +291,44 @@ def analyze_single_market_logic(m, parsed, data, models, client, global_balance)
     return result
 
 # --- VISUALIZATION HELPER ---
+def shorten_skip_reason(text):
+    """
+    Parses complex strings like 'YES: SKIP (Dead Book...) | NO: SKIP (Neg Edge...)'
+    into 'SKIP (Yes-Dead Book | No-Neg Edge)'
+    """
+    if not text: return ""
+    if "BUY" in text: return text
+    
+    try:
+        parts = text.split(" | NO:")
+        yes_full = parts[0].replace("YES: ", "")
+        no_full = parts[1] if len(parts) > 1 else ""
+        
+        def extract_code(s):
+            if "Dead Book" in s: return "Dead Book"
+            if "Odds <" in s: return "Odds < 1%"
+            if "Odds >" in s: return "Odds > 90%"
+            if "Neg Edge" in s: return "Neg Edge"
+            if "Low Edge" in s: return "Low Edge"
+            if "Bet" in s: return "Small Bet"
+            if "No Ask" in s: return "No Ask"
+            if "No Orderbook" in s: return "No OB"
+            return "Other"
+
+        y_code = extract_code(yes_full)
+        n_code = extract_code(no_full)
+        
+        return f"SKIP (Yes-{y_code}|No-{n_code})"
+    except:
+        return "SKIP"
+
 def print_event_table(event_title, end_date, btc_price, asset_vol, rows):
     logging.info("\n" + "=" * 130)
     logging.info(f"📅 EVENT: {event_title}")
     logging.info(f"   End: {end_date} | BTC: ${btc_price:,.2f} | Asset Volatility: {asset_vol:.4f}")
     logging.info("-" * 130)
     
+    # Headers
     logging.info(f"{'Outcome':<20} | {'AI Prob (Y/N)':<15} | {'Cost (Y/N)':<15} | {'Edge (Y/N)':<18} | {'Action':<50}")
     logging.info("-" * 130)
     
@@ -317,11 +346,8 @@ def print_event_table(event_title, end_date, btc_price, asset_vol, rows):
         
         action = r['action']
         if action == "SKIP":
-            # Show the reason, but truncate if it's too huge for the table
-            reason = r['reason']
-            # We already print the full reason in the log block above, so table can be succinct
-            # But user requested "details about action", so we try to fit it.
-            action = f"SKIP" 
+            # Apply Shortener for Table View ONLY
+            action = shorten_skip_reason(r['reason'])
         
         if "BUY" in action:
              action = f"🔥 {action}"
@@ -374,6 +400,7 @@ def process_pending_markets(client, models, live_data):
 def main():
     global FAKE_BALANCE
     logging.info(f"🚀 STARTING MULTI-TAG TRADER FOR: {CURRENT_ASSET}")
+    logging.info(f"   Filters: Min Edge {MIN_EDGE:.0%}, Odds Range {MIN_ODDS:.0%}-{MAX_ODDS:.0%}")
     init_log()
     
     models = []
@@ -428,7 +455,7 @@ def main():
                         if not any(k.lower() in event['title'].lower() for k in CONFIG['keywords']):
                             continue
                         
-                        logging.info("\n\n================================================================================================\n\n")
+                        logging.info(f"\n\n================================================================================================\n\n")
                         logging.info(f"\n\n🔎 EVENT: {event.get('title', 'Unknown')}\n\n")
                         markets = event.get('markets', [])
                         
@@ -481,12 +508,14 @@ def main():
                                 event_rows.append(row_result)
                                 valid_event_markets = True
                                 
-                                # IMMEDIATE LOGGING (As requested)
+                                # IMMEDIATE LOGGING
                                 if "BUY" in row_result["action"]:
                                      logging.info(f"      ✅ DECISION: {row_result['action']}")
                                 else:
                                      logging.info(f"      🛑 DECISION: {row_result['reason']}")
-
+                                     if "Dead Book" in row_result["reason"]:
+                                        logging.info(f"\n                  In a Dead Book, the Market Makers (professionals who provide liquidity) have left.\n                  The only orders remaining are 'Stub Quotes'—default orders set at the maximum price by bots or users who forgot about them.\n                  This is a sign of a market that is not being actively traded.\n                  We will not trade in this market.")
+                                
                                 # EXECUTION
                                 if "BUY" in row_result["action"]:
                                     side = "YES" if "YES" in row_result["action"] else "NO"
