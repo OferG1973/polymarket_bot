@@ -133,7 +133,7 @@ class MarketDisplay:
                             status = "🚨 ARB!"
                         elif total_cost_val < 0.995:
                             status = "✅ Good"
-                        elif total_cost_val < 1.005:
+                        elif total_cost_val < 1.002:
                             status = "⚪ Fair"
                         else:
                             status = "❌ Expensive"

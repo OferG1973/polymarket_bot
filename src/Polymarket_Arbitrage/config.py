@@ -41,8 +41,31 @@ class Config:
     MIN_VOLUME_USDC = 100.0  # Minimum trading volume to ensure market is active
     MIN_HOURS_UNTIL_END = 1.0  # Markets must end at least this many hours in the future 
 
+    # --- Fee Configuration ---
+    # Polymarket fee structure:
+    # - International markets: ~2% fee on profits (not on trades)
+    # - US markets: 0.01% (1 basis point) taker fee on premium
+    # - Gas fees: ~$0.01-$0.50 per trade on Polygon (2 trades = ~$0.02-$1.00)
+    # - Slippage: 0.5-5% depending on liquidity (already accounted for in order book prices)
+    MARKET_TYPE = "international"  # Options: "international" or "us"
+    
     # --- Risk ---
     MAX_TRADE_SIZE_USDC = 50.0
-    MIN_PROFIT_SPREAD = 0.015
+    # Minimum gross profit spread to enter arbitrage (before fees)
+    # For international markets: 2.5% gross needed to net ~0.5-1% after 2% profit fee + gas
+    # For US markets: 1.5-2% gross needed to net ~0.5-1% after 0.01% taker fee + gas
+    MIN_PROFIT_SPREAD = 0.025 if MARKET_TYPE == "international" else 0.015  # 2.5% for international, 1.5% for US
     SIMULATION_MODE = True
-    SIM_CSV_FILE = "sim_trades.csv"
+    SIM_CSV_FILE = "sim_trades.csv"  # Individual order log
+    ARB_CSV_FILE = "arbitrage_trades.csv"  # Complete arbitrage trade log
+    
+    # Fee rates (as decimals)
+    PROFIT_FEE_RATE = 0.02 if MARKET_TYPE == "international" else 0.0  # 2% on profits for international, 0% for US
+    TAKER_FEE_RATE = 0.0001 if MARKET_TYPE == "us" else 0.0  # 0.01% taker fee for US markets
+    ESTIMATED_GAS_COST_PER_TRADE = 0.25  # Estimated gas cost per trade in USDC (~$0.01-$0.50, using mid-range)
+    TOTAL_GAS_COST = ESTIMATED_GAS_COST_PER_TRADE * 2  # 2 trades (one for each outcome)
+    
+    # Minimum NET profit spread required (after all fees)
+    # For international: gross spread needs to be ~2.5-3% to net ~0.5-1% after 2% profit fee + gas
+    # For US: gross spread needs to be ~1.5-2% to net ~0.5-1% after 0.01% taker fee + gas
+    MIN_NET_PROFIT_SPREAD = 0.005  # Minimum 0.5% net profit after all fees

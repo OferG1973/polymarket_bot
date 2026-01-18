@@ -485,8 +485,9 @@ async def main():
             # Update stream subscriptions
             stream.tokens_to_sub = token_ids_to_subscribe
             
-            # Update strategy
+            # Update strategy and display
             strategy.market_pairs = market_pairs
+            display.market_pairs = market_pairs
             
             logger.info(f"✅ Replaced with: {replacement['title'][:50]}... (Market #{next_replacement_index-1} from pool)")
         else:
@@ -514,7 +515,36 @@ async def main():
     stream.tokens_to_sub = token_ids_to_subscribe 
     
     executor = ExecutionEngine(client)
-    strategy = ArbStrategy(books, market_pairs, executor)
+    
+    # Market removal callback for strategy (called after arbitrage execution)
+    def remove_market_after_arbitrage(market: Dict):
+        """Remove market from monitoring after arbitrage execution and trigger replacement"""
+        # Remove from market_pairs
+        if market in market_pairs:
+            market_pairs.remove(market)
+            logger.info(f"✅ Removed executed market from monitoring: {market['title'][:50]}...")
+        
+        # Update monitored token IDs
+        monitored_token_ids.discard(str(market['token_a']))
+        monitored_token_ids.discard(str(market['token_b']))
+        
+        # Remove from token subscriptions
+        if market['token_a'] in token_ids_to_subscribe:
+            token_ids_to_subscribe.remove(market['token_a'])
+        if market['token_b'] in token_ids_to_subscribe:
+            token_ids_to_subscribe.remove(market['token_b'])
+        
+        # Update stream subscriptions
+        stream.tokens_to_sub = token_ids_to_subscribe
+        
+        # Update display and strategy market lists
+        display.market_pairs = market_pairs
+        strategy.market_pairs = market_pairs
+        
+        # Trigger replacement with a new market
+        replace_market_sync(market)
+    
+    strategy = ArbStrategy(books, market_pairs, executor, market_removal_callback=remove_market_after_arbitrage)
     
     # Display initial table
     display.display_table()

@@ -69,12 +69,13 @@ class MarketDiscovery:
     @staticmethod
     def get_top_markets(limit: int = Config.MAX_MARKETS_TO_TRACK, skip_token_ids: set = None) -> List[Dict]:
         """
-        Scan MARKETS_TO_SCAN markets, then select the best 'limit' markets based on scoring.
+        Scan MARKETS_TO_SCAN markets, prioritizing markets ending in the next month.
+        Extends time window if not enough markets found.
         
         Selection Logic:
-        1. Scan up to MARKETS_TO_SCAN markets that meet minimum requirements
-        2. Calculate a quality score for each market
-        3. Sort by score (descending)
+        1. First collect markets ending in next 30 days
+        2. If not enough, extend to 60 days, then 90 days, etc.
+        3. Sort by time window (sooner first), then by score
         4. Return top 'limit' markets
         
         Args:
@@ -85,11 +86,16 @@ class MarketDiscovery:
             skip_token_ids = set()
         
         scan_limit = Config.MARKETS_TO_SCAN
-        logger.info(f"🔭 Scanning up to {scan_limit} markets, then selecting top {limit}...")
+        logger.info(f"🔭 Scanning markets (prioritizing next month), target: {scan_limit} markets, then selecting top {limit}...")
         
+        now = datetime.now(timezone.utc)
         valid_markets = []
         offset = 0
-        batch_size = 100 # Max allowed by Gamma API per call is usually 100
+        batch_size = 100  # Max allowed by Gamma API per call is usually 100
+        
+        # Time windows: 30 days (1 month), 60 days (2 months), 90 days (3 months), etc.
+        days_per_window = 30
+        markets_by_window = {}  # Track markets by time window
         
         while len(valid_markets) < scan_limit:
             # 1. Fetch Batch
@@ -145,16 +151,25 @@ class MarketDiscovery:
                         if end_dt.tzinfo is None:
                             end_dt = end_dt.replace(tzinfo=timezone.utc)
                         
-                        now = datetime.now(timezone.utc)
-                        
                         # Market must end in the future (at least 1 hour from now to be safe)
                         if end_dt <= now:
                             continue  # Skip expired markets
                         
-                        # Optional: Skip markets ending too soon
+                        # Calculate time until end
                         time_until_end = (end_dt - now).total_seconds() / 3600
+                        days_until_end = time_until_end / 24
+                        
+                        # Skip markets ending too soon
                         if time_until_end < Config.MIN_HOURS_UNTIL_END:
-                            continue  # Skip markets ending too soon
+                            continue
+                        
+                        # Determine which time window this market belongs to
+                        window_key = int(days_until_end // days_per_window) * days_per_window
+                        if window_key not in markets_by_window:
+                            markets_by_window[window_key] = []
+                        
+                        # Collect all valid markets (we'll prioritize by window later)
+                        # No need to filter by window during collection since API doesn't support date filtering
                             
                     except (ValueError, TypeError) as e:
                         logger.warning(f"Invalid end date format: {end_iso} - {e}")
@@ -216,9 +231,13 @@ class MarketDiscovery:
                         "end_date": end_date,
                         "volume": float(m.get("volume", 0)),
                         "liquidity": liquidity,
-                        "hours_until_end": hours_until_end  # Store for scoring
+                        "hours_until_end": hours_until_end,  # Store for scoring
+                        "days_until_end": days_until_end,  # Store for window sorting
+                        "window_key": window_key  # Store which time window
                     }
                     
+                    # Add to appropriate time window
+                    markets_by_window[window_key].append(market_obj)
                     valid_markets.append(market_obj)
 
                     if len(valid_markets) >= scan_limit:
@@ -229,9 +248,22 @@ class MarketDiscovery:
             
             # Increment offset for next page
             offset += batch_size
-            logger.info(f"   ... Scanned {offset} markets, found {len(valid_markets)} valid candidates so far.")
-
-        logger.info(f"✅ Scanned {len(valid_markets)} valid markets. Scoring and selecting top {limit}...")
+            
+            if offset % (batch_size * 2) == 0:  # Log every 200 markets
+                # Count markets by time window for logging
+                markets_0_30 = sum(len(markets) for window, markets in markets_by_window.items() if 0 <= window < 30)
+                markets_30_60 = sum(len(markets) for window, markets in markets_by_window.items() if 30 <= window < 60)
+                markets_60_90 = sum(len(markets) for window, markets in markets_by_window.items() if 60 <= window < 90)
+                logger.info(f"   ... Scanned {offset} markets, found {len(valid_markets)} total (0-30d: {markets_0_30}, 30-60d: {markets_30_60}, 60-90d: {markets_60_90})")
+        
+        # Log market distribution by time window
+        logger.info(f"✅ Scanned {len(valid_markets)} valid markets across time windows:")
+        for window in sorted(markets_by_window.keys()):
+            count = len(markets_by_window[window])
+            if count > 0:
+                logger.info(f"   {window}-{window+days_per_window} days: {count} markets")
+        
+        logger.info(f"📊 Scoring and selecting top {limit}...")
         
         # 3. Score and rank all valid markets
         scored_markets = []
@@ -240,8 +272,9 @@ class MarketDiscovery:
             market['score'] = score
             scored_markets.append(market)
         
-        # 4. Sort by score (descending) and select top N
-        scored_markets.sort(key=lambda x: x['score'], reverse=True)
+        # 4. Sort by time window first (sooner markets first), then by score (descending)
+        # This ensures markets from next month come before markets from 2 months, etc.
+        scored_markets.sort(key=lambda x: (x.get('window_key', 999), -x['score']))
         top_markets = scored_markets[:limit]
         
         # 5. Log selection summary

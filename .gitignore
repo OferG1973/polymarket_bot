@@ -37,10 +37,9 @@ venv.bak/
 .project
 .pydevproject
 
-# Data files - exclude CSV logs and generated data files
-llm_calls.csv
-polymarkets_to_ignore.csv
-data_*.csv
+# Data files - exclude all CSV files
+*.csv
+sim_trades.csv
 
 # Model files
 *.pkl
