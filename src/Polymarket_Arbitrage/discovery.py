@@ -267,21 +267,6 @@ class MarketDiscovery:
         w_outcome = 16
         w_liq = 12
 
-        print("\n" + "="*145)
-        print(f" DISPLAYING TOP 20 of {total_count} TRACKED MARKETS")
-        print("="*145)
-        header = (
-            f"| {'MARKET NAME':<{w_name}} | "
-            f"{'START':<{w_date}} | "
-            f"{'END':<{w_date}} | "
-            f"{'OUTCOME A (Available units)':<{w_outcome}} | "
-            f"{'OUTCOME B (Available units)':<{w_outcome}} | "
-            f"{'OUTCOME Total':<{w_outcome}} | "
-            f"{'LIQUIDITY':<{w_liq}} |"
-        )
-        print(header)
-        print("-" * 145)
-        
         for m in markets:
             # Format Data
             title = (m['title'][:w_name-2] + '..') if len(m['title']) > w_name else m['title']
