@@ -16,11 +16,17 @@ class ArbStrategy:
 
     async def run_loop(self):
         logger.info("🧠 Global Strategy Engine Active")
+        # Optimize scan interval based on number of markets
+        # More markets = slightly longer sleep to reduce CPU load
+        # But still fast enough to catch arbitrage opportunities
+        scan_interval = 0.01 if len(self.market_pairs) < 50 else 0.02
+        
         while True:
             if not self.is_executing:
+                # Scan all markets (this is very fast - just dict lookups)
                 for market in self.market_pairs:
                     await self.scan_market(market)
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(scan_interval)
 
     async def scan_market(self, market: Dict):
         # 1. Extract IDs and Labels dynamically
