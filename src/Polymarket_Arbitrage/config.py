@@ -42,30 +42,50 @@ class Config:
     MIN_HOURS_UNTIL_END = 1.0  # Markets must end at least this many hours in the future 
 
     # --- Fee Configuration ---
-    # Polymarket fee structure:
-    # - International markets: ~2% fee on profits (not on trades)
-    # - US markets: 0.01% (1 basis point) taker fee on premium
-    # - Gas fees: ~$0.01-$0.50 per trade on Polygon (2 trades = ~$0.02-$1.00)
+    # Polymarket fee structure (based on official docs):
+    # - Most markets: NO PLATFORM FEES (fee-free trading)
+    # - US-regulated venue (Polymarket US): 0.01% (1 basis point) taker fee on premium
+    # - 15-minute crypto markets: taker fees (varies, check specific market)
+    #
+    # GAS FEES (Blockchain Network Fees - NOT Polymarket fees):
+    # - Gas fees are Polygon network transaction costs, NOT Polymarket platform fees
+    # - On Polygon: ~$0.01-$0.10 per transaction (very low)
+    # - If using Polymarket's Builder/Relayer system with proxy wallets, gas may be covered
+    # - If using regular wallet (MetaMask, etc.), you pay gas in MATIC
+    # - For arbitrage: 2 transactions (one per outcome) = ~$0.02-$0.20 total
     # - Slippage: 0.5-5% depending on liquidity (already accounted for in order book prices)
-    MARKET_TYPE = "international"  # Options: "international" or "us"
+    #
+    # NOTE: The 2% profit fee previously assumed for international markets appears to be INCORRECT.
+    # Most Polymarket markets are fee-free. Only US-regulated venue and specific market types have fees.
+    MARKET_TYPE = "standard"  # Options: "standard" (fee-free), "us" (0.01% taker fee), "crypto_15min" (varies)
+    
+    # Gas fee configuration
+    # Set to True if using Polymarket's Builder/Relayer system (gas covered by Polymarket)
+    # Set to False if using regular wallet (you pay Polygon gas fees)
+    USE_GASLESS_TRADING = False  # Change to True if using builder/relayer system
     
     # --- Risk ---
     MAX_TRADE_SIZE_USDC = 50.0
     # Minimum gross profit spread to enter arbitrage (before fees)
-    # For international markets: 2.5% gross needed to net ~0.5-1% after 2% profit fee + gas
-    # For US markets: 1.5-2% gross needed to net ~0.5-1% after 0.01% taker fee + gas
-    MIN_PROFIT_SPREAD = 0.025 if MARKET_TYPE == "international" else 0.015  # 2.5% for international, 1.5% for US
+    # For standard markets: ~0.3-0.5% gross needed to net ~0.2-0.4% after gas (if applicable)
+    # For US markets: ~0.4-0.6% gross needed to net ~0.2-0.4% after 0.01% taker fee + gas (if applicable)
+    MIN_PROFIT_SPREAD = 0.005 if MARKET_TYPE == "standard" else 0.006  # 0.5% for standard, 0.6% for US
     SIMULATION_MODE = True
     SIM_CSV_FILE = "sim_trades.csv"  # Individual order log
     ARB_CSV_FILE = "arbitrage_trades.csv"  # Complete arbitrage trade log
     
     # Fee rates (as decimals)
-    PROFIT_FEE_RATE = 0.02 if MARKET_TYPE == "international" else 0.0  # 2% on profits for international, 0% for US
-    TAKER_FEE_RATE = 0.0001 if MARKET_TYPE == "us" else 0.0  # 0.01% taker fee for US markets
-    ESTIMATED_GAS_COST_PER_TRADE = 0.25  # Estimated gas cost per trade in USDC (~$0.01-$0.50, using mid-range)
-    TOTAL_GAS_COST = ESTIMATED_GAS_COST_PER_TRADE * 2  # 2 trades (one for each outcome)
+    # Most markets are fee-free - no profit fees, no taker fees
+    PROFIT_FEE_RATE = 0.0  # No profit fees on Polymarket (previously incorrectly assumed 2%)
+    TAKER_FEE_RATE = 0.0001 if MARKET_TYPE == "us" else 0.0  # 0.01% taker fee only for US-regulated venue
+    
+    # Gas costs (Polygon network fees - only apply if not using gasless trading)
+    # Based on official docs: Polygon gas is ~$0.01-$0.10 per transaction
+    # Using conservative estimate of $0.05 per transaction
+    ESTIMATED_GAS_COST_PER_TRADE = 0.05 if not USE_GASLESS_TRADING else 0.0  # $0.05 per trade on Polygon (or $0 if gasless)
+    TOTAL_GAS_COST = ESTIMATED_GAS_COST_PER_TRADE * 2  # 2 trades (one for each outcome) = ~$0.10 total
     
     # Minimum NET profit spread required (after all fees)
-    # For international: gross spread needs to be ~2.5-3% to net ~0.5-1% after 2% profit fee + gas
-    # For US: gross spread needs to be ~1.5-2% to net ~0.5-1% after 0.01% taker fee + gas
-    MIN_NET_PROFIT_SPREAD = 0.005  # Minimum 0.5% net profit after all fees
+    # For standard markets: gross spread needs to be ~0.3-0.5% to net ~0.2-0.4% after gas (if applicable)
+    # For US: gross spread needs to be ~0.4-0.6% to net ~0.2-0.4% after 0.01% taker fee + gas (if applicable)
+    MIN_NET_PROFIT_SPREAD = 0.002  # Minimum 0.2% net profit after all fees

@@ -5,19 +5,21 @@ import threading
 import logging
 from typing import Dict, List
 from models import LocalOrderBook
+from config import Config
 
 logger = logging.getLogger("Display")
 
 class MarketDisplay:
     """Real-time table display for tracked markets"""
     
-    def __init__(self, books: Dict[str, LocalOrderBook], market_pairs: List[Dict], replacement_callback=None):
+    def __init__(self, books: Dict[str, LocalOrderBook], market_pairs: List[Dict], replacement_callback=None, log_rotation_callback=None):
         self.books = books
         self.market_pairs = market_pairs
         self.update_count = 0
         self.last_display_time = 0
         self.display_lock = threading.Lock()  # Prevent concurrent displays
         self.replacement_callback = replacement_callback  # Callback to replace markets
+        self.log_rotation_callback = log_rotation_callback  # Callback to rotate log file
         # Track consecutive "Expensive" status counts per market (by token pair key)
         self.expensive_counts: Dict[str, int] = {}
         
@@ -44,12 +46,17 @@ class MarketDisplay:
             self.update_count += 1
             self.last_display_time = current_time
             
+            # Rotate log file every 300 table updates
+            if self.log_rotation_callback and self.update_count % 300 == 0:
+                self.log_rotation_callback()
+            
             # Define column widths (adjusted for proper alignment)
             w_row = 5   # Row number column
             w_name = 45
             w_outcome = 30  # Increased to fit "OUTCOME A (Available units)" (28 chars)
             w_total = 12
             w_spread = 12
+            w_target = 14  # Target spread column
             w_status = 15
             w_date = 12  # For start/end dates
             
@@ -61,6 +68,7 @@ class MarketDisplay:
                           1 + 1 + w_outcome + 1 + 1 +    # | OUTCOME B |
                           1 + 1 + w_total + 1 + 1 +      # | TOTAL COST |
                           1 + 1 + w_spread + 1 + 1 +     # | SPREAD |
+                          1 + 1 + w_target + 1 + 1 +     # | TARGET SPREAD |
                           1 + 1 + w_date + 1 + 1 +       # | START DATE |
                           1 + 1 + w_date + 1 + 1 +       # | END DATE |
                           1 + 1 + w_status + 1 + 1)      # | STATUS |
@@ -77,6 +85,7 @@ class MarketDisplay:
                 f"{'OUTCOME B (Available units)':<{w_outcome}} | "
                 f"{'TOTAL COST':<{w_total}} | "
                 f"{'SPREAD':<{w_spread}} | "
+                f"{'TARGET SPREAD':<{w_target}} | "
                 f"{'START DATE':<{w_date}} | "
                 f"{'END DATE':<{w_date}} | "
                 f"{'STATUS':<{w_status}} |"
@@ -100,6 +109,12 @@ class MarketDisplay:
                 book_b = self.books.get(id_b) or self.books.get(str(id_b))
                 
                 spread_value = None  # For sorting
+                
+                # Get market type for target spread calculation
+                market_type = market.get("market_type", Config.MARKET_TYPE)
+                # Most markets are fee-free, so lower threshold. US markets have 0.01% taker fee.
+                min_profit_spread = 0.011 if market_type == "us" else 0.01  # 1.1% for US (with taker fee), 1% for standard (fee-free)
+                target_spread = f"{min_profit_spread:.2%}"
                 
                 if not book_a or not book_b:
                     # No data yet
@@ -128,14 +143,20 @@ class MarketDisplay:
                         total_cost_val = p_a + p_b
                         spread_value = 1.0 - total_cost_val  # For sorting (positive = good)
                         
-                        # Determine status
-                        if total_cost_val < 0.985:  # Arbitrage opportunity
+                        # Determine status based on target spread from config
+                        # Get market type (per-market if available, otherwise use global config)
+                        market_type = market.get("market_type", Config.MARKET_TYPE)
+                        # Most markets are fee-free, so lower threshold. US markets have 0.01% taker fee.
+                        min_profit_spread = 0.011 if market_type == "us" else 0.01  # 1.1% for US (with taker fee), 1% for standard (fee-free)
+                        threshold = 1.0 - min_profit_spread
+                        
+                        if total_cost_val < threshold:  # Spread >= MIN_PROFIT_SPREAD (actual arbitrage opportunity)
                             status = "🚨 ARB!"
-                        elif total_cost_val < 0.995:
+                        elif total_cost_val < 0.995:  # Spread between 0.5% and target (good but not enough)
                             status = "✅ Good"
-                        elif total_cost_val < 1.002:
+                        elif total_cost_val < 1.002:  # Spread between 0% and 0.5% (fair)
                             status = "⚪ Fair"
-                        else:
+                        else:  # Spread negative or very small (expensive)
                             status = "❌ Expensive"
                         
                         # Track consecutive "Expensive" status
@@ -178,6 +199,7 @@ class MarketDisplay:
                     'out_b_str': out_b_str,
                     'total_cost': total_cost,
                     'spread': spread,
+                    'target_spread': target_spread,
                     'start_display': start_display,
                     'end_display': end_display,
                     'status': status
@@ -202,6 +224,7 @@ class MarketDisplay:
                     f"{data['out_b_str']:<{w_outcome}} | "
                     f"{data['total_cost']:<{w_total}} | "
                     f"{data['spread']:<{w_spread}} | "
+                    f"{data['target_spread']:<{w_target}} | "
                     f"{data['start_display']:<{w_date}} | "
                     f"{data['end_display']:<{w_date}} | "
                     f"{data['status']:<{w_status}} |"

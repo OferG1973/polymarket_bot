@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 from datetime import datetime
 from typing import Dict
 from py_clob_client.client import ClobClient
@@ -14,7 +15,7 @@ from discovery import MarketDiscovery
 from display import MarketDisplay
 
 # --- LOGGING SETUP ---
-LOG_DIR = os.path.join("src", "Polymarket_Arbitrage", "logs")
+LOG_DIR = os.path.join("/Volumes/SanDisk_Extreme_SSD", "workingFolder", "polymarket_arbitrage", "log")
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
@@ -22,17 +23,61 @@ if not os.path.exists(LOG_DIR):
 timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file = os.path.join(LOG_DIR, f"arbitrage_bot_{timestamp_str}.log")
 
-# Custom handler to capture print statements and filter httpx logs
-class FilteredFileHandler(logging.FileHandler):
-    """File handler that filters out httpx HTTP request logs"""
+# Custom handler to capture print statements and filter httpx logs with manual rotation
+class FilteredRotatingFileHandler(logging.FileHandler):
+    """File handler that filters out httpx HTTP request logs and supports manual rotation"""
+    def __init__(self, filename):
+        self.base_filename = filename
+        self.current_log_file = filename
+        super().__init__(filename, mode='a', encoding='utf-8')
+    
+    def rotate_log(self):
+        """Rotate log file by closing current and creating new one with timestamp"""
+        try:
+            # Get root logger for rotation messages (before we close the file)
+            root_logger = logging.getLogger()
+            
+            # Get current file size for logging
+            old_size_mb = 0
+            if os.path.exists(self.current_log_file):
+                old_size_mb = os.path.getsize(self.current_log_file) / (1024 * 1024)
+            
+            # Log rotation message to console (file will be closed)
+            print(f"🔄 Rotating log file (after {old_size_mb:.2f}MB): {os.path.basename(self.current_log_file)}")
+            
+            # Close current file
+            self.close()
+            
+            # Create new log file with new timestamp
+            new_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.current_log_file = os.path.join(LOG_DIR, f"arbitrage_bot_{new_timestamp}.log")
+            
+            # Reopen with new file
+            self.baseFilename = self.current_log_file
+            self.stream = self._open()
+            
+            # Log to console and new file
+            print(f"📝 New log file created: {os.path.basename(self.current_log_file)}")
+            root_logger.info(f"📝 New log file created: {os.path.basename(self.current_log_file)}")
+            
+            # Update LoggedStdout to use new log file
+            if hasattr(sys.stdout, 'log_file_path'):
+                sys.stdout.log_file_path = self.current_log_file
+                
+        except Exception as e:
+            # Use print since logger might not be available
+            print(f"❌ Error rotating log file: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def emit(self, record):
         # Filter out httpx HTTP request logs
         if record.name == 'httpx' and 'HTTP Request:' in record.getMessage():
             return
         super().emit(record)
 
-# Create file handler with filter
-file_handler = FilteredFileHandler(log_file)
+# Create file handler with filter (rotation is triggered by table updates)
+file_handler = FilteredRotatingFileHandler(log_file)
 file_handler.setFormatter(logging.Formatter(
     '%(asctime)s [%(name)s] %(levelname)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
@@ -97,7 +142,6 @@ class LoggedStdout:
                 pass
 
 # Store original stdout
-import sys
 original_stdout = sys.stdout
 
 async def main():
@@ -503,7 +547,12 @@ async def main():
             logger.warning("Replacement queue full, skipping replacement")
     
     # 5. Initialize Display with replacement callback
-    display = MarketDisplay(books, market_pairs, replacement_callback=replace_market_sync)
+    # Log rotation callback (triggered every 300 table updates)
+    def rotate_log_file():
+        """Callback to rotate log file"""
+        file_handler.rotate_log()
+    
+    display = MarketDisplay(books, market_pairs, replacement_callback=replace_market_sync, log_rotation_callback=rotate_log_file)
     
     # 6. Initialize Components
     # Create update callback that refreshes the table
@@ -545,7 +594,7 @@ async def main():
         replace_market_sync(market)
     
     strategy = ArbStrategy(books, market_pairs, executor, market_removal_callback=remove_market_after_arbitrage)
-    
+
     # Display initial table
     display.display_table()
 

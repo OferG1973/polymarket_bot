@@ -219,6 +219,20 @@ class MarketDiscovery:
                     # Calculate hours until end for scoring
                     hours_until_end = time_until_end
                     
+                    # Try to detect market type from API response
+                    # Most Polymarket markets are fee-free ("standard"). Only US-regulated venue has 0.01% taker fee.
+                    market_type = Config.MARKET_TYPE  # Default to global config (usually "standard" for fee-free)
+                    
+                    # Check if API provides market type information
+                    # Common field names: "jurisdiction", "country", "isUS", "marketType", "region"
+                    if m.get("jurisdiction") == "US" or m.get("country") == "US":
+                        market_type = "us"  # US-regulated venue (0.01% taker fee)
+                    elif m.get("isUS") is True:
+                        market_type = "us"
+                    elif m.get("marketType") == "us":
+                        market_type = "us"
+                    # Note: Most markets are fee-free ("standard"), no need to explicitly set "international"
+                    
                     market_obj = {
                         "title": m.get("question"),
                         "token_a": clob_ids[0],
@@ -233,7 +247,8 @@ class MarketDiscovery:
                         "liquidity": liquidity,
                         "hours_until_end": hours_until_end,  # Store for scoring
                         "days_until_end": days_until_end,  # Store for window sorting
-                        "window_key": window_key  # Store which time window
+                        "window_key": window_key,  # Store which time window
+                        "market_type": market_type  # Store detected market type (or default from config)
                     }
                     
                     # Add to appropriate time window

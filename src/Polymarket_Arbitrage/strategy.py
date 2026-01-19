@@ -136,15 +136,22 @@ class ArbStrategy:
         total_investment = total_cost * trade_size
         gross_profit = profit_spread * trade_size
         
-        # Calculate fees
-        # 1. Taker fee (US markets only): applied to premium (total investment)
-        taker_fee = total_investment * Config.TAKER_FEE_RATE
+        # Get market type (per-market if available, otherwise use global config)
+        market_type = market.get("market_type", Config.MARKET_TYPE) if market else Config.MARKET_TYPE
         
-        # 2. Gas costs: fixed cost per trade
-        gas_cost = Config.TOTAL_GAS_COST
+        # Calculate fees based on market type
+        # NOTE: Most Polymarket markets are fee-free. Only US-regulated venue and specific market types have fees.
+        # 1. Taker fee (US-regulated venue only): applied to premium (total investment)
+        taker_fee_rate = 0.0001 if market_type == "us" else 0.0  # 0.01% for US-regulated venue only
+        taker_fee = total_investment * taker_fee_rate
         
-        # 3. Profit fee (International markets only): applied to gross profit
-        profit_fee = gross_profit * Config.PROFIT_FEE_RATE if gross_profit > 0 else 0
+        # 2. Gas costs: Polygon network fees (only if not using gasless trading)
+        # Gas fees are blockchain network fees, NOT Polymarket platform fees
+        # If using Polymarket's Builder/Relayer system, gas may be covered (set USE_GASLESS_TRADING = True)
+        gas_cost = Config.TOTAL_GAS_COST if not Config.USE_GASLESS_TRADING else 0.0
+        
+        # 3. Profit fee: NONE on Polymarket (previously incorrectly assumed 2% for international)
+        profit_fee = 0.0  # No profit fees on Polymarket
         
         # Calculate net profit after all fees
         total_fees = taker_fee + gas_cost + profit_fee
