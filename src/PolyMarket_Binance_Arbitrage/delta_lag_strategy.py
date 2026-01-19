@@ -1,5 +1,7 @@
 import logging
 import asyncio
+import csv
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from config import Config
@@ -17,7 +19,7 @@ class DeltaLagStrategy:
     - Buy immediately, exit after 30 seconds when Polymarket catches up
     """
     
-    def __init__(self, executor, markets: List[Dict], poly_monitor):
+    def __init__(self, executor, markets: List[Dict], poly_monitor, log_dir: str = None):
         self.executor = executor
         self.markets = markets
         self.poly_monitor = poly_monitor
@@ -30,6 +32,43 @@ class DeltaLagStrategy:
         
         # Track Binance price history per crypto
         self.binance_history: Dict[str, List[tuple]] = {}  # symbol -> [(timestamp, price), ...]
+        
+        # CSV logging for positions
+        self.log_dir = log_dir or Config.LOG_DIR
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+        
+        # Create CSV file for position tracking
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.positions_csv_file = os.path.join(self.log_dir, f"positions_{timestamp_str}.csv")
+        self._init_positions_csv()
+    
+    def _init_positions_csv(self):
+        """Initialize CSV file for position tracking"""
+        if not os.path.exists(self.positions_csv_file):
+            with open(self.positions_csv_file, mode='w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "Market", "Outcome", "Entry", "Exit", "Hold Time", "Profit/Loss"
+                ])
+            logger.info(f"📊 Position tracking CSV initialized: {self.positions_csv_file}")
+    
+    def _write_position_to_csv(self, market: Dict, label: str, entry_price: float, 
+                               exit_price: float, hold_time_seconds: float, profit_pct: float, profit_usd: float):
+        """Write complete position (entry + exit) to CSV"""
+        try:
+            with open(self.positions_csv_file, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    market.get('title', 'Unknown Market'),
+                    label,
+                    f"${entry_price:.4f}",
+                    f"${exit_price:.4f}",
+                    f"{hold_time_seconds:.1f}s",
+                    f"{profit_pct:+.2f}% (${profit_usd:+.2f})"
+                ])
+        except Exception as e:
+            logger.error(f"Error writing position to CSV: {e}")
     
     async def handle_binance_move(self, move_info: Dict):
         """
@@ -245,8 +284,9 @@ class DeltaLagStrategy:
         
         if result and result.get('success'):
             # Record position
+            entry_time = datetime.now()
             self.active_positions[market_id] = {
-                'entry_time': datetime.now(),
+                'entry_time': entry_time,
                 'entry_price': entry_price,
                 'token_id': token_id,
                 'label': label,
@@ -305,6 +345,10 @@ class DeltaLagStrategy:
         logger.info(f"   Exit: ${current_price:.4f} @ {datetime.now().strftime('%H:%M:%S')}")
         logger.info(f"   Hold Time: {hold_time_seconds:.1f}s")
         logger.info(f"   Profit/Loss: {profit_pct:+.2f}% (${profit_usd:+.2f})")
+        
+        # Write complete position (entry + exit) to CSV
+        self._write_position_to_csv(market, label, entry_price, current_price, 
+                                    hold_time_seconds, profit_pct, profit_usd)
         
         # Check if profit meets minimum threshold
         if profit_pct >= Config.MIN_EXIT_PROFIT_PCT * 100:

@@ -127,8 +127,8 @@ async def main():
         poly_monitor = PolymarketPriceMonitor(markets=markets, price_update_callback=poly_price_callback)
         logger.info("✅ Polymarket price monitor initialized")
         
-        # Delta lag strategy
-        strategy = DeltaLagStrategy(executor=executor, markets=markets, poly_monitor=poly_monitor)
+        # Delta lag strategy (pass log directory for CSV file location)
+        strategy = DeltaLagStrategy(executor=executor, markets=markets, poly_monitor=poly_monitor, log_dir=Config.LOG_DIR)
         logger.info("✅ Delta lag strategy initialized")
         
         # Set Binance move callback
