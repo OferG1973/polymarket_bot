@@ -44,20 +44,25 @@ class PolymarketExecutor:
                 writer.writerow([
                     "Timestamp", "Crypto_Name", "Market_Title", "Token_A", "Token_B", 
                     "Outcome_A", "Outcome_B", "Side", "Price", "Size", 
-                    "Status", "Binance_Price", "Pump_Pct"
+                    "Status", "Binance_Price", "Pump_Pct", "Side_Description"
                 ])
     
-    async def execute_arbitrage_trade(self, market: dict, binance_price: float, pump_pct: float, crypto_name: str = "Unknown"):
+    async def execute_arbitrage_trade(self, market: dict, binance_price: float, pump_pct: float, 
+                                     crypto_name: str = "Unknown", token_id: str = None, 
+                                     label: str = None, side_desc: str = None):
         """
-        Execute arbitrage trade on Polymarket market after Binance pump
+        Execute arbitrage trade on Polymarket market after Binance move
         
-        Strategy: Buy the "YES" outcome (or outcome that benefits from price increase)
+        Strategy: Buy the outcome that benefits from the price move direction
         
         Args:
             market: Polymarket market dictionary
             binance_price: Current Binance price
-            pump_pct: Percentage pump detected
-            crypto_name: Name of the cryptocurrency that pumped
+            pump_pct: Percentage move detected (can be positive or negative)
+            crypto_name: Name of the cryptocurrency that moved
+            token_id: Token ID to buy (determined by strategy)
+            label: Outcome label (YES/NO)
+            side_desc: Description of why this outcome was chosen
         """
         try:
             token_a = market['token_a']
@@ -66,31 +71,35 @@ class PolymarketExecutor:
             label_b = market['label_b']
             title = market['title']
             
-            # Determine which outcome to buy based on market question
-            # If market is "Bitcoin > 100k", buy YES when price pumps
-            # If market is "Bitcoin < 100k", buy NO when price pumps
-            # For simplicity, assume most markets are "above X" type, so buy YES
+            # Use provided token_id and label, or default to token_a/YES
+            if token_id is None:
+                token_id = token_a
+                label = label_a
+                side_desc = "YES (default)"
+            
+            # Get price for the chosen token
+            if token_id == token_a:
+                price = market['price_a']
+            else:
+                price = market['price_b']
             
             # Calculate trade size
             trade_size = min(
-                Config.MAX_TRADE_SIZE_USDC / (market['price_a'] + market['price_b']),
+                Config.MAX_TRADE_SIZE_USDC / price,
                 market.get('liquidity', 0) / 10  # Use 10% of available liquidity
             )
             
             trade_size = max(trade_size, 1.0)  # Minimum trade size
             trade_size = round(trade_size, 2)
             
-            # Buy the "YES" outcome (token_a) - assuming it's the bullish outcome
-            price_a = market['price_a']
-            
             if self.simulation_mode:
                 return await self._simulate_trade(
-                    market, token_a, label_a, price_a, trade_size, 
-                    binance_price, pump_pct, crypto_name
+                    market, token_id, label, price, trade_size, 
+                    binance_price, pump_pct, crypto_name, side_desc
                 )
             else:
                 return await self._real_trade(
-                    token_a, label_a, price_a, trade_size
+                    token_id, label, price, trade_size
                 )
                 
         except Exception as e:
@@ -98,18 +107,20 @@ class PolymarketExecutor:
             return None
     
     async def _simulate_trade(self, market: dict, token_id: str, outcome_label: str, 
-                             price: float, size: float, binance_price: float, pump_pct: float, crypto_name: str = "Unknown"):
+                             price: float, size: float, binance_price: float, pump_pct: float, 
+                             crypto_name: str = "Unknown", side_desc: str = None):
         """Simulate trade execution"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
+        direction_emoji = "📈" if pump_pct > 0 else "📉"
         logger.info(f"📊 SIMULATED TRADE:")
         logger.info(f"   Crypto: {crypto_name}")
         logger.info(f"   Market: {market['title'][:60]}...")
-        logger.info(f"   Outcome: {outcome_label}")
+        logger.info(f"   Outcome: {outcome_label} ({side_desc or 'N/A'})")
         logger.info(f"   Price: {price:.4f}")
         logger.info(f"   Size: {size:.2f}")
         logger.info(f"   Binance Price: ${binance_price:,.2f}")
-        logger.info(f"   Pump: {pump_pct:.2f}%")
+        logger.info(f"   Move: {pump_pct:+.2f}% {direction_emoji}")
         
         # Log to CSV
         csv_file = Config.SIM_CSV_FILE
@@ -123,12 +134,13 @@ class PolymarketExecutor:
                 market['token_b'],
                 market['label_a'],
                 market['label_b'],
-                "BUY",
+                outcome_label,
                 price,
                 size,
                 "SIMULATED",
                 binance_price,
-                pump_pct
+                pump_pct,
+                side_desc or "N/A"
             ])
         
         return {

@@ -35,6 +35,7 @@ class DeltaLagStrategy:
         """
         Handle Binance delta move detection
         Check if Polymarket has lagged behind
+        Now supports both upward and downward moves
         """
         symbol = move_info['symbol']
         crypto_name = move_info.get('crypto_name', symbol.split('/')[0])
@@ -42,11 +43,9 @@ class DeltaLagStrategy:
         move_pct = move_info['price_change_pct']
         direction = move_info['direction']
         
-        # Only trade on upward moves (buy YES when price goes up)
-        if direction != 'up':
-            return
-        
-        logger.info(f"📈 Binance Move: {crypto_name} moved {move_pct:+.2f}% to ${binance_price:,.2f}")
+        # Trade on both upward and downward moves
+        direction_emoji = "📈" if direction == 'up' else "📉"
+        logger.info(f"{direction_emoji} Binance Move: {crypto_name} moved {move_pct:+.2f}% to ${binance_price:,.2f}")
         
         # Find markets related to this crypto
         related_markets = self._find_related_markets(crypto_name, symbol)
@@ -72,6 +71,61 @@ class DeltaLagStrategy:
         
         return related
     
+    def _determine_market_direction(self, market: Dict) -> str:
+        """
+        Determine if market is bullish (above X) or bearish (below X)
+        Returns: 'bullish' or 'bearish'
+        """
+        title = market.get('title', '').lower()
+        
+        # Check for bearish indicators (below, under, less than, dip to)
+        bearish_keywords = ['below', 'under', 'less than', 'dip to', 'drop to', 'fall to', '<']
+        if any(keyword in title for keyword in bearish_keywords):
+            return 'bearish'
+        
+        # Check for bullish indicators (above, over, reach, hit, exceed, >)
+        bullish_keywords = ['above', 'over', 'reach', 'hit', 'exceed', '>', 'higher']
+        if any(keyword in title for keyword in bullish_keywords):
+            return 'bullish'
+        
+        # Default to bullish (most markets are "above X" type)
+        return 'bullish'
+    
+    def _determine_outcome_to_buy(self, market: Dict, move_direction: str) -> tuple:
+        """
+        Determine which outcome to buy based on market direction and price move direction
+        
+        Returns: (token_id, label, price, side_description)
+        """
+        market_direction = self._determine_market_direction(market)
+        
+        # Logic:
+        # Bullish market (e.g., "Bitcoin > $100k"):
+        #   - Upward move → Buy YES (price going up makes "above X" more likely)
+        #   - Downward move → Buy NO (price going down makes "above X" less likely)
+        # Bearish market (e.g., "Bitcoin < $50k"):
+        #   - Upward move → Buy NO (price going up makes "below X" less likely)
+        #   - Downward move → Buy YES (price going down makes "below X" more likely)
+        
+        if market_direction == 'bullish':
+            if move_direction == 'up':
+                # Bullish market + upward move = Buy YES
+                return (market.get('token_a'), market.get('label_a', 'YES'), 
+                       market.get('price_a', 0), 'YES (bullish market, price up)')
+            else:
+                # Bullish market + downward move = Buy NO
+                return (market.get('token_b'), market.get('label_b', 'NO'), 
+                       market.get('price_b', 0), 'NO (bullish market, price down)')
+        else:  # bearish
+            if move_direction == 'up':
+                # Bearish market + upward move = Buy NO
+                return (market.get('token_b'), market.get('label_b', 'NO'), 
+                       market.get('price_b', 0), 'NO (bearish market, price up)')
+            else:
+                # Bearish market + downward move = Buy YES
+                return (market.get('token_a'), market.get('label_a', 'YES'), 
+                       market.get('price_a', 0), 'YES (bearish market, price down)')
+    
     async def _check_lag_opportunity(self, market: Dict, move_info: Dict):
         """Check if there's a lag opportunity for this market"""
         market_id = str(market.get('market_id', market.get('token_a', '')))
@@ -90,11 +144,20 @@ class DeltaLagStrategy:
         # Get last known Polymarket price
         last_poly = self.last_poly_prices.get(market_id)
         
-        # Calculate if Polymarket has lagged
-        current_poly_price = poly_prices.get('token_a', 0)  # Price of YES outcome
+        # Determine which outcome to buy based on market and move direction
+        move_direction = move_info['direction']
+        token_id, label, price, side_desc = self._determine_outcome_to_buy(market, move_direction)
+        
+        # Get current and last prices for the relevant outcome
+        if token_id == market.get('token_a'):
+            current_poly_price = poly_prices.get('token_a', 0)
+            last_poly_price_key = 'token_a'
+        else:
+            current_poly_price = poly_prices.get('token_b', 0)
+            last_poly_price_key = 'token_b'
         
         if last_poly:
-            last_poly_price = last_poly.get('token_a', current_poly_price)
+            last_poly_price = last_poly.get(last_poly_price_key, current_poly_price)
             last_timestamp = last_poly.get('timestamp', datetime.now())
             time_since_update = (datetime.now() - last_timestamp).total_seconds()
             
@@ -102,49 +165,57 @@ class DeltaLagStrategy:
             poly_price_change = current_poly_price - last_poly_price
             poly_price_change_pct = ((current_poly_price - last_poly_price) / last_poly_price * 100) if last_poly_price > 0 else 0
             
-            # If Binance moved up but Polymarket hasn't moved up (or moved less), there's lag
-            binance_move_pct = move_info['price_change_pct']
+            # Binance move magnitude (absolute value)
+            binance_move_pct = abs(move_info['price_change_pct'])
             
             # Lag condition: Binance moved significantly, but Polymarket hasn't reacted proportionally
-            # Expected: If Bitcoin moves 0.3%, Polymarket YES price should move ~0.5 cents
-            # If Polymarket hasn't moved much (< 0.1% change), there's lag
-            expected_poly_move = abs(binance_move_pct) * 0.1  # Rough estimate: 10% of Binance move
+            # Expected: If Bitcoin moves 0.3%, Polymarket price should move ~0.03% (10% of Binance move)
+            # If Polymarket hasn't moved much (< expected), there's lag
+            expected_poly_move = binance_move_pct * 0.1  # Rough estimate: 10% of Binance move
             
+            # Check lag for both directions (absolute move threshold)
             if (binance_move_pct > Config.DELTA_THRESHOLD_PERCENT and 
                 abs(poly_price_change_pct) < expected_poly_move and
                 time_since_update > Config.EXPECTED_LAG_MIN):
                 # LAG DETECTED! Polymarket hasn't reacted yet
+                market_direction = self._determine_market_direction(market)
+                direction_emoji = "📈" if move_direction == 'up' else "📉"
+                
                 print("\n" + "="*80)
                 print("🚨 TRADE SIGNALS 🚨")
                 print("="*80)
                 print(f"MICRO-LAG DETECTED!")
                 print(f"Market: {market.get('title', 'unknown')}")
-                print(f"Binance moved: {binance_move_pct:+.2f}%")
-                print(f"Polymarket price: {last_poly_price:.4f} -> {current_poly_price:.4f} ({poly_price_change_pct:+.2f}%)")
+                print(f"Market Type: {market_direction.upper()}")
+                print(f"Binance moved: {move_info['price_change_pct']:+.2f}% ({direction_emoji})")
+                print(f"Buying: {side_desc}")
+                print(f"Polymarket {label} price: {last_poly_price:.4f} -> {current_poly_price:.4f} ({poly_price_change_pct:+.2f}%)")
                 print(f"Expected Poly move: {expected_poly_move:.2f}%")
                 print(f"Time since Poly update: {time_since_update:.1f}s")
                 print("="*80 + "\n")
                 
                 logger.info(f"🎯 LAG DETECTED: {market.get('title', 'unknown')[:60]}")
-                logger.info(f"   Binance moved: {binance_move_pct:+.2f}%")
-                logger.info(f"   Polymarket price: {last_poly_price:.4f} -> {current_poly_price:.4f} ({poly_price_change_pct:+.2f}%)")
+                logger.info(f"   Market Type: {market_direction.upper()}")
+                logger.info(f"   Binance moved: {move_info['price_change_pct']:+.2f}% ({move_direction})")
+                logger.info(f"   Buying: {side_desc}")
+                logger.info(f"   Polymarket {label} price: {last_poly_price:.4f} -> {current_poly_price:.4f} ({poly_price_change_pct:+.2f}%)")
                 logger.info(f"   Expected Poly move: {expected_poly_move:.2f}%")
                 logger.info(f"   Time since Poly update: {time_since_update:.1f}s")
                 
-                # Execute trade
-                await self._execute_lag_trade(market, move_info, current_poly_price)
+                # Execute trade with determined outcome
+                await self._execute_lag_trade(market, move_info, current_poly_price, token_id, label, side_desc)
         else:
-            # First time seeing this market, store price
+            # First time seeing this market, store both prices
             self.last_poly_prices[market_id] = {
-                'token_a': current_poly_price,
+                'token_a': poly_prices.get('token_a', 0),
                 'token_b': poly_prices.get('token_b', 0),
                 'timestamp': datetime.now()
             }
     
-    async def _execute_lag_trade(self, market: Dict, move_info: Dict, entry_price: float):
+    async def _execute_lag_trade(self, market: Dict, move_info: Dict, entry_price: float, 
+                                 token_id: str, label: str, side_desc: str):
         """Execute trade when lag is detected"""
         market_id = str(market.get('market_id', market.get('token_a', '')))
-        token_a = market.get('token_a')
         
         # Calculate trade size
         trade_size = min(
@@ -156,6 +227,7 @@ class DeltaLagStrategy:
         
         logger.info(f"🚀 Executing LAG TRADE:")
         logger.info(f"   Market: {market.get('title', 'unknown')[:60]}")
+        logger.info(f"   Outcome: {label} ({side_desc})")
         logger.info(f"   Entry Price: {entry_price:.4f}")
         logger.info(f"   Trade Size: {trade_size:.2f}")
         
@@ -165,7 +237,10 @@ class DeltaLagStrategy:
             market=market,
             binance_price=move_info['current_price'],
             pump_pct=move_info['price_change_pct'],
-            crypto_name=crypto_name
+            crypto_name=crypto_name,
+            token_id=token_id,
+            label=label,
+            side_desc=side_desc
         )
         
         if result and result.get('success'):
@@ -173,12 +248,13 @@ class DeltaLagStrategy:
             self.active_positions[market_id] = {
                 'entry_time': datetime.now(),
                 'entry_price': entry_price,
-                'token_id': token_a,
+                'token_id': token_id,
+                'label': label,
                 'size': trade_size,
                 'market': market
             }
             
-            logger.info(f"✅ Position opened: {market.get('title', 'unknown')[:50]}")
+            logger.info(f"✅ Position opened: {market.get('title', 'unknown')[:50]} ({label})")
             
             # Schedule exit after hold time
             asyncio.create_task(self._schedule_exit(market_id))
@@ -209,11 +285,19 @@ class DeltaLagStrategy:
             logger.warning(f"⚠️ Cannot exit: No price data for {market.get('title', 'unknown')[:50]}")
             return
         
-        current_price = poly_prices.get('token_a', entry_price)
+        # Get current price for the token we bought
+        token_id = position['token_id']
+        label = position.get('label', 'Unknown')
+        if token_id == market.get('token_a'):
+            current_price = poly_prices.get('token_a', entry_price)
+        else:
+            current_price = poly_prices.get('token_b', entry_price)
+        
         profit_pct = ((current_price - entry_price) / entry_price) * 100
         
         logger.info(f"💰 EXITING POSITION:")
         logger.info(f"   Market: {market.get('title', 'unknown')[:60]}")
+        logger.info(f"   Outcome: {label}")
         logger.info(f"   Entry: {entry_price:.4f} @ {entry_time.strftime('%H:%M:%S')}")
         logger.info(f"   Exit: {current_price:.4f} @ {datetime.now().strftime('%H:%M:%S')}")
         logger.info(f"   Profit: {profit_pct:+.2f}%")
