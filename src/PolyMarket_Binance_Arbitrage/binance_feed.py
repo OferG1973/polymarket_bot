@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Callable
 from collections import deque
 from config import Config
+from websocket_health import health_monitor
 
 logger = logging.getLogger("BinanceFeed")
 
@@ -166,6 +167,9 @@ class BinancePriceFeed:
                                                           f"Keys: {list(data.keys())[:10]}")
                                         except Exception:
                                             pass
+                                    
+                                    # Update health monitor timestamp
+                                    health_monitor.update_binance_timestamp()
                                     
                                     await self._handle_ticker_update(data)
                                 except json.JSONDecodeError as e:

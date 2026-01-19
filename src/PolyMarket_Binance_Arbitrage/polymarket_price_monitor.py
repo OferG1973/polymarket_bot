@@ -8,6 +8,7 @@ from typing import Dict, Optional, Callable
 from datetime import datetime
 from models import LocalOrderBook
 from config import Config
+from websocket_health import health_monitor
 
 logger = logging.getLogger("PolyPriceMonitor")
 
@@ -191,6 +192,9 @@ class PolymarketPriceMonitor:
                                             DETAILED_LEVEL = logging.DEBUG + 1
                                             if logger.isEnabledFor(DETAILED_LEVEL):
                                                 logger.log(DETAILED_LEVEL, f"📨 Polymarket WebSocket: Received {message_count} messages so far...")
+                                    
+                                    # Update health monitor timestamp
+                                    health_monitor.update_polymarket_timestamp()
                                     
                                     # Handle both dict and list messages
                                     if isinstance(data, list):

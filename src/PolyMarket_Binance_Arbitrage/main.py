@@ -9,6 +9,7 @@ from polymarket_discovery import PolymarketDiscovery
 from execution import PolymarketExecutor
 from delta_lag_strategy import DeltaLagStrategy
 from polymarket_price_monitor import PolymarketPriceMonitor
+from websocket_health import health_monitor
 
 # --- LOGGING SETUP ---
 if not os.path.exists(Config.LOG_DIR):
@@ -153,6 +154,9 @@ async def main():
         logger.info(f"Monitoring {len(markets)} markets on Polymarket")
         logger.info(f"Delta Threshold: {Config.DELTA_THRESHOLD_PERCENT}% move in {Config.DELTA_DETECTION_WINDOW}s")
         logger.info("=" * 80 + "\n")
+        
+        # Start WebSocket health monitoring thread
+        health_monitor.start_monitoring(check_interval_seconds=60)
         
         # Start both Binance and Polymarket monitoring concurrently
         await asyncio.gather(
