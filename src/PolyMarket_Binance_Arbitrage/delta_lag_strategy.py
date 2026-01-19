@@ -294,13 +294,17 @@ class DeltaLagStrategy:
             current_price = poly_prices.get('token_b', entry_price)
         
         profit_pct = ((current_price - entry_price) / entry_price) * 100
+        profit_usd = (current_price - entry_price) * position['size']
+        hold_time_seconds = (datetime.now() - entry_time).total_seconds()
         
-        logger.info(f"💰 EXITING POSITION:")
+        profit_emoji = "💰" if profit_pct > 0 else "📉" if profit_pct < 0 else "➖"
+        logger.info(f"{profit_emoji} EXITING POSITION:")
         logger.info(f"   Market: {market.get('title', 'unknown')[:60]}")
         logger.info(f"   Outcome: {label}")
-        logger.info(f"   Entry: {entry_price:.4f} @ {entry_time.strftime('%H:%M:%S')}")
-        logger.info(f"   Exit: {current_price:.4f} @ {datetime.now().strftime('%H:%M:%S')}")
-        logger.info(f"   Profit: {profit_pct:+.2f}%")
+        logger.info(f"   Entry: ${entry_price:.4f} @ {entry_time.strftime('%H:%M:%S')}")
+        logger.info(f"   Exit: ${current_price:.4f} @ {datetime.now().strftime('%H:%M:%S')}")
+        logger.info(f"   Hold Time: {hold_time_seconds:.1f}s")
+        logger.info(f"   Profit/Loss: {profit_pct:+.2f}% (${profit_usd:+.2f})")
         
         # Check if profit meets minimum threshold
         if profit_pct >= Config.MIN_EXIT_PROFIT_PCT * 100:
@@ -335,8 +339,44 @@ class DeltaLagStrategy:
         
         position = self.active_positions[market_id]
         entry_time = position['entry_time']
+        entry_price = position['entry_price']
         hold_time = (datetime.now() - entry_time).total_seconds()
         
+        # Get current Polymarket price for the position
+        poly_prices = self.poly_monitor.get_market_prices(market_id)
+        if not poly_prices:
+            return
+        
+        market = position['market']
+        token_id = position['token_id']
+        label = position.get('label', 'Unknown')
+        
+        # Get current price for the token we bought
+        if token_id == market.get('token_a'):
+            current_price = poly_prices.get('token_a', entry_price)
+        else:
+            current_price = poly_prices.get('token_b', entry_price)
+        
+        # Calculate current profit/loss
+        profit_pct = ((current_price - entry_price) / entry_price) * 100
+        profit_usd = (current_price - entry_price) * position['size']
+        
+        # Log profit/loss update (every 5 seconds to avoid spam)
+        if not hasattr(position, 'last_profit_log_time'):
+            position['last_profit_log_time'] = entry_time
+        
+        time_since_last_log = (datetime.now() - position['last_profit_log_time']).total_seconds()
+        if time_since_last_log >= 5.0:  # Log every 5 seconds
+            profit_emoji = "💰" if profit_pct > 0 else "📉" if profit_pct < 0 else "➖"
+            logger.info(f"{profit_emoji} Position P&L: {market.get('title', 'unknown')[:50]} ({label}) | "
+                       f"Entry: ${entry_price:.4f} | Current: ${current_price:.4f} | "
+                       f"Profit: {profit_pct:+.2f}% (${profit_usd:+.2f}) | Hold: {hold_time:.1f}s")
+            position['last_profit_log_time'] = datetime.now()
+        
+        # Check for early exit if profit threshold met before hold time
+        if profit_pct >= Config.MIN_EXIT_PROFIT_PCT * 100 and hold_time >= 10:  # At least 10 seconds
+            logger.info(f"✅ Early exit triggered: Profit {profit_pct:.2f}% reached before hold time")
+            await self._exit_position(market_id)
         # Exit if hold time exceeded
-        if hold_time >= Config.EXIT_HOLD_SECONDS:
+        elif hold_time >= Config.EXIT_HOLD_SECONDS:
             await self._exit_position(market_id)
