@@ -183,6 +183,14 @@ class DeltaLagStrategy:
             )
             return
         
+        # Check market spread before proceeding
+        market_title = market.get('title', 'unknown')[:60]
+        spread_acceptable, spread_reason = self.poly_monitor.check_market_spread(market_id)
+        
+        if not spread_acceptable:
+            logger.info(f"Potential Lag - Step 3) Market filtered out: {market_title} - {spread_reason}")
+            return
+        
         # Get current Polymarket prices
         poly_prices = self.poly_monitor.get_market_prices(market_id)
         
@@ -302,10 +310,68 @@ class DeltaLagStrategy:
                 'timestamp': datetime.now()
             }
     
+    def _calculate_max_bid(self, current_poly_price: float, binance_move_pct: float) -> float:
+        """
+        Calculate maximum bid price that will still produce profit
+        
+        Logic:
+        1. Estimate expected Polymarket price movement based on Binance move
+        2. Calculate expected exit price after Polymarket catches up
+        3. Calculate max_bid that ensures minimum profit target
+        
+        Args:
+            current_poly_price: Current Polymarket price for the outcome
+            binance_move_pct: Binance price movement percentage (absolute value)
+        
+        Returns:
+            max_bid: Maximum price we can pay and still make profit
+        """
+        # Estimate expected Polymarket move (conservative: 10% of Binance move)
+        # This is the same ratio used in lag detection
+        expected_poly_move_pct = abs(binance_move_pct) * 0.1
+        
+        # Calculate expected exit price after Polymarket catches up
+        # For upward Binance move, Polymarket price should increase
+        # For downward Binance move, Polymarket price should decrease
+        # We use absolute value since we're buying the correct outcome
+        expected_exit_price = current_poly_price * (1 + expected_poly_move_pct)
+        
+        # Calculate max_bid: maximum price we can pay and still achieve MIN_EXIT_PROFIT_PCT
+        # Formula: (exit_price - entry_price) / entry_price >= MIN_EXIT_PROFIT_PCT
+        # Solving for entry_price: entry_price <= exit_price / (1 + MIN_EXIT_PROFIT_PCT)
+        max_bid = expected_exit_price / (1 + Config.MIN_EXIT_PROFIT_PCT)
+        
+        return max_bid
+    
     async def _execute_lag_trade(self, market: Dict, move_info: Dict, entry_price: float, 
                                  token_id: str, label: str, side_desc: str):
         """Execute trade when lag is detected"""
         market_id = str(market.get('market_id', market.get('token_a', '')))
+        
+        market_title = market.get('title', 'unknown')[:60]
+        binance_move_pct = move_info.get('price_change_pct', 0.0)
+        binance_price = move_info.get('current_price', 0.0)
+        
+        # Determine order type for this trade
+        if Config.SIMULATION_MODE and Config.SIMULATION_TEST_BOTH_STRATEGIES:
+            # In simulation testing mode, we'll test both strategies
+            use_limit_check = True  # Check max_bid for LIMIT strategy
+        else:
+            # Real trading: use configured order type
+            order_type = Config.ORDER_TYPE.upper()
+            use_limit_check = (order_type == "LIMIT")
+        
+        # Calculate max_bid: maximum price we can pay and still make profit (for LIMIT orders)
+        max_bid = self._calculate_max_bid(entry_price, binance_move_pct) if use_limit_check else None
+        
+        # Check if current Polymarket price is acceptable (only for LIMIT orders)
+        if use_limit_check and entry_price > max_bid:
+            logger.info(
+                f"Potential Lag - Step 4) Trade NOT executed for market: {market_title} ({label}) - "
+                f"price too high: ${entry_price:.4f} > max_bid ${max_bid:.4f} "
+                f"(would not achieve {Config.MIN_EXIT_PROFIT_PCT*100:.1f}% profit target)"
+            )
+            return
         
         # Calculate trade size
         trade_size = min(
@@ -315,9 +381,11 @@ class DeltaLagStrategy:
         trade_size = max(trade_size, 1.0)
         trade_size = round(trade_size, 2)
         
-        market_title = market.get('title', 'unknown')[:60]
-        binance_move_pct = move_info.get('price_change_pct', 0.0)
-        binance_price = move_info.get('current_price', 0.0)
+        # Calculate expected profit for logging (using same logic as _calculate_max_bid)
+        expected_poly_move_pct = abs(binance_move_pct) * 0.1
+        expected_exit_price = entry_price * (1 + expected_poly_move_pct)
+        expected_profit_pct = ((expected_exit_price - entry_price) / entry_price) * 100
+        price_buffer = ((max_bid - entry_price) / entry_price) * 100 if max_bid and max_bid >= entry_price else 0
 
         # Step 4: Log trade decision details
         logger.info(f"Potential Lag - Step 4) Preparing trade for market: {market_title}")
@@ -326,48 +394,151 @@ class DeltaLagStrategy:
             f"Trade Size: {trade_size:.2f} | Binance Price: ${binance_price:,.2f} | "
             f"Binance Move: {binance_move_pct:+.2f}%"
         )
+        if max_bid:
+            logger.info(
+                f"   Max Bid: ${max_bid:.4f} | Price Buffer: {price_buffer:+.2f}% | "
+                f"Expected Exit: ${expected_exit_price:.4f} | Expected Profit: {expected_profit_pct:+.2f}%"
+            )
+        else:
+            logger.info(
+                f"   Order Type: MARKET | Expected Exit: ${expected_exit_price:.4f} | Expected Profit: {expected_profit_pct:+.2f}%"
+            )
 
         logger.info(f"🚀 Executing LAG TRADE:")
         logger.info(f"   Market: {market_title}")
         logger.info(f"   Outcome: {label} ({side_desc})")
-        logger.info(f"   Entry Price: {entry_price:.4f}")
+        if max_bid:
+            logger.info(f"   Entry Price: {entry_price:.4f} (max_bid: ${max_bid:.4f})")
+        else:
+            logger.info(f"   Entry Price: {entry_price:.4f} (MARKET order)")
         logger.info(f"   Trade Size: {trade_size:.2f}")
         
-        # Execute buy order
         crypto_name = move_info.get('crypto_name', move_info['symbol'].split('/')[0])
-        result = await self.executor.execute_arbitrage_trade(
-            market=market,
-            binance_price=move_info['current_price'],
-            pump_pct=move_info['price_change_pct'],
-            crypto_name=crypto_name,
-            token_id=token_id,
-            label=label,
-            side_desc=side_desc
-        )
         
-        if result and result.get('success'):
-            # Record position
-            entry_time = datetime.now()
-            self.active_positions[market_id] = {
-                'entry_time': entry_time,
-                'entry_price': entry_price,
-                'token_id': token_id,
-                'label': label,
-                'size': trade_size,
-                'market': market
-            }
+        # In simulation mode: Test both LIMIT and MARKET strategies if enabled
+        if Config.SIMULATION_MODE and Config.SIMULATION_TEST_BOTH_STRATEGIES:
+            logger.info(f"🧪 SIMULATION MODE: Testing both LIMIT and MARKET strategies")
             
-            logger.info(f"Potential Lag - Step 4) Trade executed successfully for market: {market_title} ({label})")
-            logger.info(f"✅ Position opened: {market_title[:50]} ({label})")
-            
-            # Schedule exit after hold time
-            asyncio.create_task(self._schedule_exit(market_id))
-        else:
-            logger.warning(f"⚠️ Trade failed: {market_title[:50]}")
-            logger.info(
-                f"Potential Lag - Step 4) Trade NOT executed for market: {market_title} ({label}) - "
-                f"executor returned failure or no confirmation"
+            # Strategy 1: LIMIT order with max_bid
+            logger.info(f"   Testing LIMIT strategy (max_bid: ${max_bid:.4f})")
+            limit_result = await self.executor.execute_arbitrage_trade(
+                market=market,
+                binance_price=move_info['current_price'],
+                pump_pct=move_info['price_change_pct'],
+                crypto_name=crypto_name,
+                token_id=token_id,
+                label=label,
+                side_desc=side_desc,
+                limit_price=entry_price,  # Use entry_price (which is <= max_bid)
+                order_type="LIMIT"
             )
+            
+            # Strategy 2: MARKET order with current ask price
+            logger.info(f"   Testing MARKET strategy (current ask: ${entry_price:.4f})")
+            market_result = await self.executor.execute_arbitrage_trade(
+                market=market,
+                binance_price=move_info['current_price'],
+                pump_pct=move_info['price_change_pct'],
+                crypto_name=crypto_name,
+                token_id=token_id,
+                label=label,
+                side_desc=side_desc,
+                market_price=entry_price,  # Use current ask price
+                order_type="MARKET"
+            )
+            
+            # Record both positions for comparison (use LIMIT result for tracking)
+            if limit_result and limit_result.get('success'):
+                entry_time = datetime.now()
+                self.active_positions[market_id] = {
+                    'entry_time': entry_time,
+                    'entry_price': entry_price,
+                    'token_id': token_id,
+                    'label': label,
+                    'size': trade_size,
+                    'market': market,
+                    'order_type': 'LIMIT',  # Track which strategy
+                    'market_price': entry_price  # Store market price for comparison
+                }
+                logger.info(f"Potential Lag - Step 4) LIMIT trade simulated successfully")
+            
+            if market_result and market_result.get('success'):
+                # Also track MARKET position separately if needed
+                market_position_id = f"{market_id}_MARKET"
+                entry_time = datetime.now()
+                self.active_positions[market_position_id] = {
+                    'entry_time': entry_time,
+                    'entry_price': entry_price,
+                    'token_id': token_id,
+                    'label': label,
+                    'size': trade_size,
+                    'market': market,
+                    'order_type': 'MARKET',
+                    'limit_price': max_bid  # Store max_bid for comparison
+                }
+                logger.info(f"Potential Lag - Step 4) MARKET trade simulated successfully")
+            
+            if limit_result and limit_result.get('success'):
+                logger.info(f"✅ Position opened (LIMIT): {market_title[:50]} ({label})")
+                asyncio.create_task(self._schedule_exit(market_id))
+            if market_result and market_result.get('success'):
+                logger.info(f"✅ Position opened (MARKET): {market_title[:50]} ({label})")
+                asyncio.create_task(self._schedule_exit(market_position_id))
+        else:
+            # Real trading or single strategy simulation: Use configured order type
+            order_type = Config.ORDER_TYPE.upper()
+            
+            if order_type == "MARKET":
+                # Market order: use current ask price (no max_bid check)
+                result = await self.executor.execute_arbitrage_trade(
+                    market=market,
+                    binance_price=move_info['current_price'],
+                    pump_pct=move_info['price_change_pct'],
+                    crypto_name=crypto_name,
+                    token_id=token_id,
+                    label=label,
+                    side_desc=side_desc,
+                    market_price=entry_price,
+                    order_type="MARKET"
+                )
+            else:
+                # Limit order: use max_bid (already checked above)
+                result = await self.executor.execute_arbitrage_trade(
+                    market=market,
+                    binance_price=move_info['current_price'],
+                    pump_pct=move_info['price_change_pct'],
+                    crypto_name=crypto_name,
+                    token_id=token_id,
+                    label=label,
+                    side_desc=side_desc,
+                    limit_price=entry_price,
+                    order_type="LIMIT"
+                )
+            
+            if result and result.get('success'):
+                # Record position
+                entry_time = datetime.now()
+                self.active_positions[market_id] = {
+                    'entry_time': entry_time,
+                    'entry_price': entry_price,
+                    'token_id': token_id,
+                    'label': label,
+                    'size': trade_size,
+                    'market': market,
+                    'order_type': order_type
+                }
+                
+                logger.info(f"Potential Lag - Step 4) Trade executed successfully for market: {market_title} ({label}) [{order_type}]")
+                logger.info(f"✅ Position opened: {market_title[:50]} ({label})")
+                
+                # Schedule exit after hold time
+                asyncio.create_task(self._schedule_exit(market_id))
+            else:
+                logger.warning(f"⚠️ Trade failed: {market_title[:50]}")
+                logger.info(
+                    f"Potential Lag - Step 4) Trade NOT executed for market: {market_title} ({label}) - "
+                    f"executor returned failure or no confirmation"
+                )
     
     async def _schedule_exit(self, market_id: str):
         """Schedule exit after hold time"""

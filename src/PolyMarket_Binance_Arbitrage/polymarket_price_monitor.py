@@ -4,7 +4,7 @@ import logging
 import socket
 import ssl
 import json
-from typing import Dict, Optional, Callable
+from typing import Dict, Optional, Callable, Tuple
 from datetime import datetime
 from models import LocalOrderBook
 from config import Config
@@ -51,8 +51,9 @@ class PolymarketPriceMonitor:
         self.last_summary_log = datetime.now()
         self.price_update_count = 0
         
-        # Track which markets have received their first WebSocket data (for INFO level logging)
-        self.first_data_received: set = set()  # Set of market_ids that have received first data
+        # Track which tokens have received their first WebSocket data (for INFO level logging)
+        self.first_token_data_received: set = set()  # Set of token_ids that have received first data
+        self.both_tokens_initialized: set = set()  # Set of market_ids where both tokens have prices
         
         logger.info(f"✅ Initialized price monitor for {len(self.token_ids)} tokens across {len(markets)} markets")
         
@@ -100,6 +101,103 @@ class PolymarketPriceMonitor:
                 'total': price_a + price_b
             }
         return None
+    
+    def get_token_spread_pct(self, token_id: str) -> Optional[float]:
+        """Get the bid/ask spread percentage for a token"""
+        book = self.books.get(str(token_id))
+        if not book:
+            return None
+        
+        bid_price, _ = book.get_best_bid()
+        ask_price, _ = book.get_best_ask()
+        
+        if bid_price is None or ask_price is None or bid_price <= 0:
+            return None
+        
+        spread_pct = ((ask_price - bid_price) / bid_price) * 100
+        return spread_pct
+    
+    def check_market_spread(self, market_id: str) -> Tuple[bool, Optional[str]]:
+        """
+        Check if market spread is acceptable for trading
+        Returns: (is_acceptable, reason_if_not)
+        """
+        market = next((m for m in self.markets if str(m.get('market_id', '')) == market_id), None)
+        if not market:
+            return False, "Market not found"
+        
+        token_a = str(market.get('token_a'))
+        token_b = str(market.get('token_b'))
+        
+        # Get spreads for both tokens
+        spread_a = self.get_token_spread_pct(token_a)
+        spread_b = self.get_token_spread_pct(token_b)
+        
+        # Check if we have valid spreads
+        if spread_a is None and spread_b is None:
+            return False, "No bid/ask data available for either token"
+        
+        # Check token A spread
+        if spread_a is not None and spread_a > Config.MAX_SPREAD_PCT:
+            label_a = market.get('label_a', 'YES')
+            return False, f"{label_a} token spread ({spread_a:.2f}%) exceeds maximum ({Config.MAX_SPREAD_PCT:.2f}%)"
+        
+        # Check token B spread
+        if spread_b is not None and spread_b > Config.MAX_SPREAD_PCT:
+            label_b = market.get('label_b', 'NO')
+            return False, f"{label_b} token spread ({spread_b:.2f}%) exceeds maximum ({Config.MAX_SPREAD_PCT:.2f}%)"
+        
+        # If we only have one token's spread, that's acceptable if it's within limit
+        if spread_a is None or spread_b is None:
+            # At least one token has acceptable spread
+            return True, None
+        
+        # Both tokens have acceptable spreads
+        return True, None
+    
+    def _check_and_log_both_tokens_initialized(self, asset_id: str):
+        """Check if both tokens for any market containing this asset_id are now initialized"""
+        asset_id_str = str(asset_id)
+        
+        for market in self.markets:
+            market_id = str(market.get('market_id', market.get('token_a', '')))
+            token_a = str(market.get('token_a', ''))
+            token_b = str(market.get('token_b', ''))
+            
+            # Check if this asset_id belongs to this market
+            if asset_id_str == token_a or asset_id_str == token_b:
+                # Skip if already initialized
+                if market_id in self.both_tokens_initialized:
+                    continue
+                
+                # Get prices for both tokens
+                token_a_price = None
+                token_b_price = None
+                book_a = self.books.get(token_a)
+                book_b = self.books.get(token_b)
+                
+                if book_a:
+                    ask_a, _ = book_a.get_best_ask()
+                    if ask_a:
+                        token_a_price = ask_a
+                
+                if book_b:
+                    ask_b, _ = book_b.get_best_ask()
+                    if ask_b:
+                        token_b_price = ask_b
+                
+                # If both tokens have prices, log initialization
+                if token_a_price is not None and token_b_price is not None:
+                    self.both_tokens_initialized.add(market_id)
+                    market_title = market.get('title', 'Unknown Market')
+                    label_a = market.get('label_a', 'YES')
+                    label_b = market.get('label_b', 'NO')
+                    total_price = token_a_price + token_b_price
+                    spread_pct = abs(total_price - 1.0) * 100
+                    logger.info(f"✅ Market fully initialized (both tokens): {market_title} | "
+                               f"{label_a}: ${token_a_price:.4f} | {label_b}: ${token_b_price:.4f} | "
+                               f"Total: ${total_price:.4f} (spread: {spread_pct:.2f}%)")
+                break  # Found the market, no need to continue
     
     def _log_all_market_prices(self):
         """Log all market prices in a summary format"""
@@ -228,35 +326,241 @@ class PolymarketPriceMonitor:
             return
         
         # Handle different message types
-        msg_type = data.get("type")
-        asset_id = data.get("asset_id")
+        msg_type = data.get("type") or data.get("event_type")  # Check both fields
+        asset_id_raw = data.get("asset_id")
+        
+        # Process the message first to update orderbooks
+        # Then check if we need to log first data or both tokens initialized
+        
+        # Handle "book" type messages first (update orderbooks)
+        if msg_type == "book" and asset_id_raw:
+            asset_id = str(asset_id_raw)
+            if asset_id in self.books:
+                book = self.books[asset_id]
+                book.clear()  # Clear existing book for full refresh
+                
+                # Process bids
+                bids = data.get("bids", [])
+                if isinstance(bids, list):
+                    for bid in bids:
+                        if isinstance(bid, (list, tuple)) and len(bid) >= 2:
+                            try:
+                                price = float(bid[0])
+                                size = float(bid[1])
+                                book.update("buy", price, size)
+                            except (ValueError, IndexError, TypeError):
+                                pass
+                
+                # Process asks
+                asks = data.get("asks", [])
+                if isinstance(asks, list):
+                    for ask in asks:
+                        if isinstance(ask, (list, tuple)) and len(ask) >= 2:
+                            try:
+                                price = float(ask[0])
+                                size = float(ask[1])
+                                book.update("sell", price, size)
+                            except (ValueError, IndexError, TypeError):
+                                pass
+        
+        # Check for first data for ANY message type that has an asset_id
+        # This ensures we log first data even if it's not delta/snapshot
+        if asset_id_raw:
+            asset_id = str(asset_id_raw)
+            # Check if this is the first data for this specific token
+            is_first_token_data = asset_id not in self.first_token_data_received
+            
+            # Check if this token belongs to any market
+            for market in self.markets:
+                market_id = str(market.get('market_id', market.get('token_a', '')))
+                token_a = str(market.get('token_a', ''))
+                token_b = str(market.get('token_b', ''))
+                
+                if asset_id == token_a or asset_id == token_b:
+                    market_title = market.get('title', 'Unknown Market')
+                    outcome_label = market.get('label_a', 'YES') if asset_id == token_a else market.get('label_b', 'NO')
+                    
+                    # Extract prices from this message (for logging the current token's bid/ask)
+                    bids = data.get("bids", [])
+                    asks = data.get("asks", [])
+                    best_bid_price = None
+                    best_bid_size = 0
+                    best_ask_price = None
+                    best_ask_size = 0
+                    
+                    # Extract best bid/ask from message
+                    if isinstance(bids, list) and len(bids) > 0:
+                        try:
+                            best_bid = bids[0]
+                            if isinstance(best_bid, (list, tuple)) and len(best_bid) >= 2:
+                                best_bid_price = float(best_bid[0])
+                                best_bid_size = float(best_bid[1])
+                            elif isinstance(best_bid, dict):
+                                best_bid_price = float(best_bid.get("price", best_bid.get(0, 0)))
+                                best_bid_size = float(best_bid.get("size", best_bid.get(1, 0)))
+                        except (ValueError, IndexError, TypeError):
+                            pass
+                    
+                    if isinstance(asks, list) and len(asks) > 0:
+                        try:
+                            best_ask = asks[0]
+                            if isinstance(best_ask, (list, tuple)) and len(best_ask) >= 2:
+                                best_ask_price = float(best_ask[0])
+                                best_ask_size = float(best_ask[1])
+                            elif isinstance(best_ask, dict):
+                                best_ask_price = float(best_ask.get("price", best_ask.get(0, 0)))
+                                best_ask_size = float(best_ask.get("size", best_ask.get(1, 0)))
+                        except (ValueError, IndexError, TypeError):
+                            pass
+                    
+                    # ALWAYS read prices from BOTH orderbooks (after current message has been processed)
+                    # The orderbook update happens at the top of _handle_message (lines 336-364)
+                    # So by the time we get here, the current message's orderbook is already updated
+                    token_a_price = None
+                    token_b_price = None
+                    book_a = self.books.get(token_a)
+                    book_b = self.books.get(token_b)
+                    
+                    # Read from orderbooks (these should have data from previous messages + current message)
+                    if book_a:
+                        ask_a, _ = book_a.get_best_ask()
+                        if ask_a:
+                            token_a_price = ask_a
+                    
+                    if book_b:
+                        ask_b, _ = book_b.get_best_ask()
+                        if ask_b:
+                            token_b_price = ask_b
+                    
+                    # If orderbooks don't have prices yet, use prices from this current message
+                    # This handles the case where this is the first message for a token
+                    if token_a_price is None and asset_id == token_a and best_ask_price:
+                        token_a_price = best_ask_price
+                    elif token_b_price is None and asset_id == token_b and best_ask_price:
+                        token_b_price = best_ask_price
+                    
+                    # Build price info string - prioritize showing YES/NO prices
+                    # This happens for ALL messages, not just first token data
+                    price_info_parts = []
+                    label_a = market.get('label_a', 'YES')
+                    label_b = market.get('label_b', 'NO')
+                    
+                    # Check if we have prices for both tokens
+                    has_both_prices = token_a_price is not None and token_b_price is not None
+                    
+                    # Always try to show both YES and NO prices first
+                    if has_both_prices:
+                        total_price = token_a_price + token_b_price
+                        spread_pct = abs(total_price - 1.0) * 100
+                        price_info_parts.append(f"{label_a}: ${token_a_price:.4f} | {label_b}: ${token_b_price:.4f} | Total: ${total_price:.4f} (spread: {spread_pct:.2f}%)")
+                    elif token_a_price is not None:
+                        price_info_parts.append(f"{label_a}: ${token_a_price:.4f} | {label_b}: N/A (waiting for {label_b} token data)")
+                    elif token_b_price is not None:
+                        price_info_parts.append(f"{label_a}: N/A (waiting for {label_a} token data) | {label_b}: ${token_b_price:.4f}")
+                    
+                    # Add bid/ask for the specific token (with explanation)
+                    if best_bid_price is not None or best_ask_price is not None:
+                        token_bid_ask = []
+                        if best_bid_price is not None:
+                            token_bid_ask.append(f"{outcome_label} Bid: ${best_bid_price:.4f} (size: {best_bid_size:.0f})")
+                        if best_ask_price is not None:
+                            token_bid_ask.append(f"{outcome_label} Ask: ${best_ask_price:.4f} (size: {best_ask_size:.0f})")
+                        if token_bid_ask:
+                            # Add explanation: Bid = buy price, Ask = sell price, Size = tokens available
+                            price_info_parts.append(f"Orderbook: {', '.join(token_bid_ask)}")
+                    
+                    # Build final price info string
+                    if not price_info_parts:
+                        price_info = f"No prices available yet"
+                    else:
+                        price_info = " | ".join(price_info_parts)
+                    
+                    # Mark this token as having received data
+                    if is_first_token_data:
+                        self.first_token_data_received.add(asset_id)
+                        
+                        # Log first WebSocket message for this token at INFO level
+                        if has_both_prices:
+                            status_note = "✅ Both tokens have prices"
+                        else:
+                            missing_token = label_b if asset_id == token_a else label_a
+                            status_note = f"⏳ Waiting for {missing_token} token data"
+                        
+                        logger.info(f"📥 First {outcome_label} message for market: {market_title} | "
+                                   f"Token ID: {asset_id[:16]}... | "
+                                   f"Message type: {msg_type or 'unknown'} | "
+                                   f"{status_note} | "
+                                   f"{price_info}")
+                    else:
+                        # Additional messages only shown in DETAILED mode
+                        if Config.LOG_LEVEL.upper() == "DETAILED":
+                            DETAILED_LEVEL = logging.DEBUG + 1
+                            if logger.isEnabledFor(DETAILED_LEVEL):
+                                logger.log(DETAILED_LEVEL, f"📥 Additional {outcome_label} message for market: {market_title} | "
+                                          f"Token ID: {asset_id[:16]}... | "
+                                          f"Message type: {msg_type or 'unknown'} | "
+                                          f"{price_info}")
+                    
+                    # Always check if both tokens are now initialized (for ANY message)
+                    # This ensures we log initialization even if second token arrives after first token's second message
+                    if has_both_prices and market_id not in self.both_tokens_initialized:
+                        self.both_tokens_initialized.add(market_id)
+                        total_price = token_a_price + token_b_price
+                        spread_pct = abs(total_price - 1.0) * 100
+                        logger.info(f"✅ Market fully initialized (both tokens): {market_title} | "
+                                   f"{label_a}: ${token_a_price:.4f} | {label_b}: ${token_b_price:.4f} | "
+                                   f"Total: ${total_price:.4f} (spread: {spread_pct:.2f}%)")
+                    
+                    break  # Found the market, no need to continue
         
         # We'll log after processing to show actual prices
         
-        if msg_type == "delta":
-            asset_id = str(data.get("asset_id", ""))
+        # Handle "book" type messages (same as snapshot - full orderbook)
+        if msg_type == "book":
+            # Treat book messages like snapshots
+            asset_id = str(asset_id_raw) if asset_id_raw else ""
             if asset_id in self.books:
                 book = self.books[asset_id]
+                book.clear()  # Clear existing book for full refresh
                 
-                # Check if this is the first data for any market containing this token
-                # Find market(s) that contain this token
-                for market in self.markets:
-                    market_id = str(market.get('market_id', ''))
-                    token_a = str(market.get('token_a', ''))
-                    token_b = str(market.get('token_b', ''))
-                    
-                    if asset_id == token_a or asset_id == token_b:
-                        # Check if this is first data for this market
-                        if market_id not in self.first_data_received:
-                            self.first_data_received.add(market_id)
-                            market_title = market.get('title', 'Unknown Market')
-                            outcome_label = market.get('label_a', 'YES') if asset_id == token_a else market.get('label_b', 'NO')
-                            
-                            # Log first WebSocket data at INFO level
-                            logger.info(f"📥 First Polymarket WebSocket data received for market: {market_title} | "
-                                       f"Token: {outcome_label} ({asset_id[:16]}...) | "
-                                       f"Message type: {msg_type} | "
-                                       f"Raw data keys: {list(data.keys())[:10]}")
+                # Process bids
+                bids = data.get("bids", [])
+                if isinstance(bids, list):
+                    for bid in bids:
+                        if isinstance(bid, (list, tuple)) and len(bid) >= 2:
+                            try:
+                                price = float(bid[0])
+                                size = float(bid[1])
+                                book.update("buy", price, size)
+                            except (ValueError, IndexError, TypeError):
+                                pass
+                
+                # Process asks
+                asks = data.get("asks", [])
+                if isinstance(asks, list):
+                    for ask in asks:
+                        if isinstance(ask, (list, tuple)) and len(ask) >= 2:
+                            try:
+                                price = float(ask[0])
+                                size = float(ask[1])
+                                book.update("sell", price, size)
+                            except (ValueError, IndexError, TypeError):
+                                pass
+                
+                # Notify callback if we have prices
+                if self.price_update_callback:
+                    price, size = book.get_best_ask()
+                    if price is not None:
+                        await self.price_update_callback(asset_id, price, size)
+                
+                # Check if both tokens are now initialized (after processing book message)
+                self._check_and_log_both_tokens_initialized(asset_id)
+        
+        if msg_type == "delta":
+            asset_id = str(asset_id_raw) if asset_id_raw else ""
+            
+            if asset_id in self.books:
+                book = self.books[asset_id]
                 
                 # Store old prices for logging
                 old_best_bid, old_best_bid_size = book.get_best_bid()
@@ -293,6 +597,9 @@ class PolymarketPriceMonitor:
                 # Get new prices after update
                 new_best_bid, new_best_bid_size = book.get_best_bid()
                 new_best_ask, new_best_ask_size = book.get_best_ask()
+                
+                # Check if both tokens are now initialized (after processing delta)
+                self._check_and_log_both_tokens_initialized(asset_id)
                 
                 # Detailed logging: Log price updates with actual prices
                 if Config.LOG_LEVEL.upper() == "DETAILED":
@@ -383,28 +690,10 @@ class PolymarketPriceMonitor:
         
         elif msg_type == "snapshot":
             # Handle initial snapshot
-            asset_id = str(data.get("asset_id", ""))
+            asset_id = str(asset_id_raw) if asset_id_raw else ""
+            
             if asset_id in self.books:
                 book = self.books[asset_id]
-                
-                # Check if this is the first data for any market containing this token
-                for market in self.markets:
-                    market_id = str(market.get('market_id', ''))
-                    token_a = str(market.get('token_a', ''))
-                    token_b = str(market.get('token_b', ''))
-                    
-                    if asset_id == token_a or asset_id == token_b:
-                        # Check if this is first data for this market
-                        if market_id not in self.first_data_received:
-                            self.first_data_received.add(market_id)
-                            market_title = market.get('title', 'Unknown Market')
-                            outcome_label = market.get('label_a', 'YES') if asset_id == token_a else market.get('label_b', 'NO')
-                            
-                            # Log first WebSocket data at INFO level
-                            logger.info(f"📥 First Polymarket WebSocket data received for market: {market_title} | "
-                                       f"Token: {outcome_label} ({asset_id[:16]}...) | "
-                                       f"Message type: {msg_type} (snapshot) | "
-                                       f"Raw data keys: {list(data.keys())[:10]}")
                 
                 # Process snapshot bids
                 bids = data.get("bids", [])

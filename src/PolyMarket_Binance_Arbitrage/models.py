@@ -48,6 +48,13 @@ class LocalOrderBook:
         if not self.asks: return (None, 0)
         return (self.best_ask, self.asks[self.best_ask])
 
+    def clear(self):
+        """Clear all bids and asks from the orderbook"""
+        self.bids.clear()
+        self.asks.clear()
+        self.best_bid = 0.0
+        self.best_ask = 0.0
+    
     def get_best_bid(self) -> tuple:
         """Returns (Price, Size)"""
         if not self.bids: return (None, 0)

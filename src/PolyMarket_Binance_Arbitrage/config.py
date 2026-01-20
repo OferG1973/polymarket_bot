@@ -66,6 +66,11 @@ class Config:
     # Minimum liquidity required to trade
     MIN_LIQUIDITY_USDC = 1000.0
     
+    # Maximum allowed spread percentage (bid/ask spread) for a market to be tradeable
+    # Spread = (Ask - Bid) / Bid * 100
+    # Markets with spreads wider than this will be filtered out
+    MAX_SPREAD_PCT = 2.0  # 2% maximum spread (e.g., $0.45 bid, $0.46 ask = 2.2% spread)
+    
     # Maximum number of markets to monitor
     MAX_MARKETS_TO_MONITOR = 60  # 20 markets per crypto (3 cryptos: BTC, ETH, SOL)
     
@@ -108,3 +113,12 @@ class Config:
     TOTAL_GAS_COST = ESTIMATED_GAS_COST_PER_TRADE * 2  # 2 trades (buy both outcomes)
     
     MIN_NET_PROFIT_SPREAD = 0.005  # Minimum 0.5% net profit after fees
+    
+    # --- Order Type Configuration ---
+    # Options: "LIMIT" or "MARKET"
+    # LIMIT: Uses max_bid calculation, only executes if price <= max_bid
+    # MARKET: Executes immediately at best available price (no max_bid check)
+    ORDER_TYPE = "LIMIT"  # For real trading: "LIMIT" or "MARKET"
+    
+    # Simulation mode: Set to True to test BOTH strategies simultaneously
+    SIMULATION_TEST_BOTH_STRATEGIES = True  # If True, simulates both LIMIT and MARKET orders
