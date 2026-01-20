@@ -51,6 +51,9 @@ class PolymarketPriceMonitor:
         self.last_summary_log = datetime.now()
         self.price_update_count = 0
         
+        # Track which markets have received their first WebSocket data (for INFO level logging)
+        self.first_data_received: set = set()  # Set of market_ids that have received first data
+        
         logger.info(f"✅ Initialized price monitor for {len(self.token_ids)} tokens across {len(markets)} markets")
         
         # Detailed logging: Log each market being monitored
@@ -235,6 +238,26 @@ class PolymarketPriceMonitor:
             if asset_id in self.books:
                 book = self.books[asset_id]
                 
+                # Check if this is the first data for any market containing this token
+                # Find market(s) that contain this token
+                for market in self.markets:
+                    market_id = str(market.get('market_id', ''))
+                    token_a = str(market.get('token_a', ''))
+                    token_b = str(market.get('token_b', ''))
+                    
+                    if asset_id == token_a or asset_id == token_b:
+                        # Check if this is first data for this market
+                        if market_id not in self.first_data_received:
+                            self.first_data_received.add(market_id)
+                            market_title = market.get('title', 'Unknown Market')
+                            outcome_label = market.get('label_a', 'YES') if asset_id == token_a else market.get('label_b', 'NO')
+                            
+                            # Log first WebSocket data at INFO level
+                            logger.info(f"📥 First Polymarket WebSocket data received for market: {market_title} | "
+                                       f"Token: {outcome_label} ({asset_id[:16]}...) | "
+                                       f"Message type: {msg_type} | "
+                                       f"Raw data keys: {list(data.keys())[:10]}")
+                
                 # Store old prices for logging
                 old_best_bid, old_best_bid_size = book.get_best_bid()
                 old_best_ask, old_best_ask_size = book.get_best_ask()
@@ -363,6 +386,25 @@ class PolymarketPriceMonitor:
             asset_id = str(data.get("asset_id", ""))
             if asset_id in self.books:
                 book = self.books[asset_id]
+                
+                # Check if this is the first data for any market containing this token
+                for market in self.markets:
+                    market_id = str(market.get('market_id', ''))
+                    token_a = str(market.get('token_a', ''))
+                    token_b = str(market.get('token_b', ''))
+                    
+                    if asset_id == token_a or asset_id == token_b:
+                        # Check if this is first data for this market
+                        if market_id not in self.first_data_received:
+                            self.first_data_received.add(market_id)
+                            market_title = market.get('title', 'Unknown Market')
+                            outcome_label = market.get('label_a', 'YES') if asset_id == token_a else market.get('label_b', 'NO')
+                            
+                            # Log first WebSocket data at INFO level
+                            logger.info(f"📥 First Polymarket WebSocket data received for market: {market_title} | "
+                                       f"Token: {outcome_label} ({asset_id[:16]}...) | "
+                                       f"Message type: {msg_type} (snapshot) | "
+                                       f"Raw data keys: {list(data.keys())[:10]}")
                 
                 # Process snapshot bids
                 bids = data.get("bids", [])

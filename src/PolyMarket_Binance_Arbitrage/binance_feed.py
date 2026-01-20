@@ -33,6 +33,9 @@ class BinancePriceFeed:
         # Move detection callback
         self.pump_callback: Optional[Callable] = None
         
+        # Track if first WebSocket data has been received (for INFO level logging)
+        self.first_data_received = False
+        
     def set_pump_callback(self, callback: Callable):
         """Set callback function to be called when delta move is detected"""
         self.pump_callback = callback
@@ -199,6 +202,9 @@ class BinancePriceFeed:
                         print(f"✅ Binance WebSocket Connected for {self.symbol}")
                         logger.info(f"✅ Binance WebSocket Connected for {self.symbol}")
                         
+                        # Reset first data flag on new connection
+                        self.first_data_received = False
+                        
                         # Listen for ticker updates
                         async for msg in ws:
                             if msg.type == aiohttp.WSMsgType.TEXT:
@@ -219,6 +225,21 @@ class BinancePriceFeed:
                                     
                                     # Update health monitor timestamp
                                     health_monitor.update_binance_timestamp()
+                                    
+                                    # Log first WebSocket data at INFO level
+                                    if not self.first_data_received:
+                                        self.first_data_received = True
+                                        crypto_name = self._get_crypto_name(self.symbol)
+                                        event_type = data.get('e', 'Unknown')
+                                        price = data.get('c', data.get('p', 'N/A'))
+                                        try:
+                                            price_str = f"${float(price):,.2f}" if price and str(price).replace('.', '').replace('-', '').isdigit() else str(price)
+                                        except:
+                                            price_str = str(price)
+                                        logger.info(f"📥 First Binance WebSocket data received for {crypto_name} ({self.symbol}) | "
+                                                   f"Event type: {event_type} | "
+                                                   f"Price: {price_str} | "
+                                                   f"Raw data keys: {list(data.keys())[:10]}")
                                     
                                     await self._handle_ticker_update(data)
                                 except json.JSONDecodeError as e:

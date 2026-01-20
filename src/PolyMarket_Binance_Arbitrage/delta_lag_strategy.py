@@ -188,9 +188,22 @@ class DeltaLagStrategy:
         
         if not poly_prices:
             market_title = market.get('title', 'unknown')[:60]
+            # Check which tokens are missing prices for better diagnostics
+            token_a = str(market.get('token_a', ''))
+            token_b = str(market.get('token_b', ''))
+            price_a = self.poly_monitor.get_market_price(market_id, token_a) if token_a else None
+            price_b = self.poly_monitor.get_market_price(market_id, token_b) if token_b else None
+            
+            missing_tokens = []
+            if price_a is None:
+                missing_tokens.append(f"Token A ({token_a[:8]}...)")
+            if price_b is None:
+                missing_tokens.append(f"Token B ({token_b[:8]}...)")
+            
+            missing_info = f"missing prices for: {', '.join(missing_tokens)}" if missing_tokens else "no orderbook data received yet"
             logger.info(
                 f"Potential Lag - Step 3) No lag detected for market: {market_title} - "
-                f"no Polymarket orderbook/price data available yet for this market"
+                f"no Polymarket orderbook/price data available yet ({missing_info})"
             )
             return
         
