@@ -84,13 +84,18 @@ class DeltaLagStrategy:
         
         # Trade on both upward and downward moves
         direction_emoji = "📈" if direction == 'up' else "📉"
-        logger.info(f"{direction_emoji} Binance Move: {crypto_name} moved {move_pct:+.2f}% to ${binance_price:,.2f}")
         
         # Find markets related to this crypto
         related_markets = self._find_related_markets(crypto_name, symbol)
         
-        if not related_markets:
-            logger.debug(f"   No related markets found for {crypto_name}")
+        # Step 2: Log market matching result
+        if related_markets:
+            market_names = [m.get('title', 'Unknown')[:60] for m in related_markets]
+            logger.info(f"Potential Lag - Step 2) Market match found: {len(related_markets)} market(s) found for {crypto_name}: "
+                       f"{', '.join(market_names[:3])}{'...' if len(market_names) > 3 else ''}")
+        else:
+            logger.info(f"Potential Lag - Step 2) Market match not found: No related markets found for {crypto_name} "
+                       f"(moved {move_pct:+.2f}% to ${binance_price:,.2f})")
             return
         
         # Check each market for lag opportunity
@@ -220,6 +225,17 @@ class DeltaLagStrategy:
                 market_direction = self._determine_market_direction(market)
                 direction_emoji = "📈" if move_direction == 'up' else "📉"
                 
+                # Step 3: Log lag detection with details
+                logger.info(f"Potential Lag - Step 3) 🎯 LAG DETECTED for market: {market.get('title', 'unknown')[:60]}")
+                logger.info(f"   Market Type: {market_direction.upper()}")
+                logger.info(f"   Binance moved: {move_info['price_change_pct']:+.2f}% ({move_direction})")
+                logger.info(f"   Buying: {side_desc}")
+                logger.info(f"   Polymarket {label} price: {last_poly_price:.4f} -> {current_poly_price:.4f} ({poly_price_change_pct:+.2f}%)")
+                logger.info(f"   Expected Poly move: {expected_poly_move:.2f}%")
+                logger.info(f"   Time since Poly update: {time_since_update:.1f}s")
+                logger.info(f"   Lag Details: Binance moved {binance_move_pct:.2f}% but Polymarket only moved {abs(poly_price_change_pct):.2f}% "
+                           f"(expected ~{expected_poly_move:.2f}%), indicating {time_since_update:.1f}s lag")
+                
                 print("\n" + "="*80)
                 print("🚨 TRADE SIGNALS 🚨")
                 print("="*80)
@@ -233,16 +249,24 @@ class DeltaLagStrategy:
                 print(f"Time since Poly update: {time_since_update:.1f}s")
                 print("="*80 + "\n")
                 
-                logger.info(f"🎯 LAG DETECTED: {market.get('title', 'unknown')[:60]}")
-                logger.info(f"   Market Type: {market_direction.upper()}")
-                logger.info(f"   Binance moved: {move_info['price_change_pct']:+.2f}% ({move_direction})")
-                logger.info(f"   Buying: {side_desc}")
-                logger.info(f"   Polymarket {label} price: {last_poly_price:.4f} -> {current_poly_price:.4f} ({poly_price_change_pct:+.2f}%)")
-                logger.info(f"   Expected Poly move: {expected_poly_move:.2f}%")
-                logger.info(f"   Time since Poly update: {time_since_update:.1f}s")
-                
                 # Execute trade with determined outcome
                 await self._execute_lag_trade(market, move_info, current_poly_price, token_id, label, side_desc)
+            else:
+                # Step 3: Log when lag is NOT detected
+                market_title = market.get('title', 'unknown')[:60]
+                if binance_move_pct <= Config.DELTA_THRESHOLD_PERCENT:
+                    logger.info(f"Potential Lag - Step 3) No lag detected for market: {market_title} - "
+                               f"Binance move ({binance_move_pct:.2f}%) below threshold ({Config.DELTA_THRESHOLD_PERCENT:.2f}%)")
+                elif abs(poly_price_change_pct) >= expected_poly_move:
+                    logger.info(f"Potential Lag - Step 3) No lag detected for market: {market_title} - "
+                               f"Polymarket already reacted (moved {abs(poly_price_change_pct):.2f}%, expected {expected_poly_move:.2f}%)")
+                elif time_since_update <= Config.EXPECTED_LAG_MIN:
+                    logger.info(f"Potential Lag - Step 3) No lag detected for market: {market_title} - "
+                               f"Polymarket updated too recently ({time_since_update:.1f}s ago, min lag: {Config.EXPECTED_LAG_MIN}s)")
+                else:
+                    logger.info(f"Potential Lag - Step 3) No lag detected for market: {market_title} - "
+                               f"Conditions not met (Binance: {binance_move_pct:.2f}%, Poly: {abs(poly_price_change_pct):.2f}%, "
+                               f"Time: {time_since_update:.1f}s)")
         else:
             # First time seeing this market, store both prices
             self.last_poly_prices[market_id] = {

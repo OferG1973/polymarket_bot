@@ -113,8 +113,9 @@ class BinancePriceFeed:
                     'window_start': window_start
                 }
                 
-                logger.info(f"📈 DELTA MOVE: {self.symbol} moved {price_change_pct:+.2f}% "
-                          f"({start_price:.2f} -> {current_price:.2f}) in {Config.DELTA_DETECTION_WINDOW}s")
+                direction_emoji = "📈" if price_change_pct > 0 else "📉"
+                logger.info(f"Potential Lag - Step 1) {direction_emoji} Binance movement detected: {self.symbol} moved {price_change_pct:+.2f}% "
+                          f"({start_price:.2f} -> {current_price:.2f}) within {Config.DELTA_DETECTION_WINDOW} seconds")
                 
                 return move_info
         
