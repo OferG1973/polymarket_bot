@@ -16,7 +16,7 @@ parser.add_argument("--asset", type=str, default="BTC")
 args = parser.parse_args()
 
 # --- LOGGING SETUP ---
-LOG_DIR = os.path.join("src", "Binance_Futures", "logs")
+LOG_DIR = os.path.join("/Volumes/SanDisk_Extreme_SSD", "workingFolder", "binance_futures", "logs")
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
@@ -122,14 +122,20 @@ def main():
     init_csv()
     
     models = []
+    # Log the location where the code is running from
+    current_dir = os.getcwd()
+    logging.info(f"Running from directory: {current_dir}")
     for i in range(NUM_MODELS):
+        logging.info(f"Loading model: {MODEL_PREFIX}{i}.json")
         try:
             m = xgb.XGBClassifier()
             m.load_model(f"{MODEL_PREFIX}{i}.json")
             models.append(m)
-        except: pass
+        except Exception as e:
+            logging.exception(f"❌ Failed to load model: {MODEL_PREFIX}{i}.json | Error: {e}")
+            pass
     if not models: 
-        logging.error("❌ No models found! Train first.")
+        logging.error(f"❌ No models found! Train first. Searched in: {MODEL_PREFIX}*.json")
         return
 
     while True:
