@@ -65,7 +65,7 @@ class Config:
     USE_GASLESS_TRADING = False  # Change to True if using builder/relayer system
     
     # --- Risk ---
-    MAX_TRADE_SIZE_USDC = 50.0
+    MAX_TRADE_SIZE_USDC = 20000.0
     # Minimum gross profit spread to enter arbitrage (before fees)
     # For standard markets: ~0.3-0.5% gross needed to net ~0.2-0.4% after gas (if applicable)
     # For US markets: ~0.4-0.6% gross needed to net ~0.2-0.4% after 0.01% taker fee + gas (if applicable)
