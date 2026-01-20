@@ -82,11 +82,13 @@ class Config:
     SIM_CSV_FILE = "binance_polymarket_trades.csv"
     
     # --- Logging ---
-    LOG_LEVEL = "INFO"  # Options: "INFO" or "DETAILED"
+    LOG_LEVEL = "INFO"  # Options: "INFO", "DETAILED", or "MOVEMENT"
     # DETAILED level will log:
     # - Each market being monitored
     # - Every Binance WebSocket message
     # - Every Polymarket WebSocket message
+    # MOVEMENT level will log:
+    # - Every movement check with timestamps (Step 1 checks) to see if the price has moved more than 0.2% in 10 seconds (thus potential arbitrage opportunity)
     LOG_DIR = os.path.join("/Volumes/SanDisk_Extreme_SSD", "workingFolder", "binance_polymarket_arbitrage", "log")
     if not os.path.exists(LOG_DIR):
         os.makedirs(LOG_DIR)

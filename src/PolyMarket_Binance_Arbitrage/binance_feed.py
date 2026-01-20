@@ -81,25 +81,46 @@ class BinancePriceFeed:
         now = datetime.now()
         window_start = now - timedelta(seconds=Config.DELTA_DETECTION_WINDOW)
         
-        # Get price at start of window and current price
+        # Get price at start of window and current price (with timestamps)
         start_price = None
+        start_price_timestamp = None
         current_price = self.current_price
+        current_price_timestamp = now  # Current price timestamp is "now"
         
         # Find price closest to window start
         for timestamp, price in self.price_history:
             if timestamp >= window_start:
                 if start_price is None:
                     start_price = price
+                    start_price_timestamp = timestamp
                 elif timestamp < self.price_history[0][0]:
                     start_price = price
+                    start_price_timestamp = timestamp
                 break
         
         # If no price in window, use oldest price
         if start_price is None and len(self.price_history) > 0:
             start_price = self.price_history[0][1]
+            start_price_timestamp = self.price_history[0][0]
         
         if start_price and current_price and start_price > 0:
             price_change_pct = ((current_price - start_price) / start_price) * 100
+            
+            # Get crypto name from symbol (e.g., "BTC/USDT" -> "Bitcoin")
+            crypto_name = self._get_crypto_name(self.symbol)
+            
+            # Log every check only if LOG_LEVEL is set to MOVEMENT
+            if Config.LOG_LEVEL.upper() == "MOVEMENT":
+                direction_emoji = "📈" if price_change_pct > 0 else "📉" if price_change_pct < 0 else "➖"
+                start_time_str = start_price_timestamp.strftime('%H:%M:%S.%f')[:-3] if start_price_timestamp else "N/A"
+                current_time_str = current_price_timestamp.strftime('%H:%M:%S.%f')[:-3] if current_price_timestamp else "N/A"
+                
+                MOVEMENT_LEVEL = logging.DEBUG + 2
+                if logger.isEnabledFor(MOVEMENT_LEVEL):
+                    logger.log(MOVEMENT_LEVEL, f"Potential Lag - Step 1) Checking movement: {crypto_name} ({self.symbol}) | "
+                              f"Start price: ${start_price:.2f} @ {start_time_str} | "
+                              f"Current price: ${current_price:.2f} @ {current_time_str} | "
+                              f"Movement: {price_change_pct:+.2f}% {direction_emoji}")
             
             # Check if move exceeds threshold (positive or negative)
             if abs(price_change_pct) >= Config.DELTA_THRESHOLD_PERCENT:
@@ -113,13 +134,40 @@ class BinancePriceFeed:
                     'window_start': window_start
                 }
                 
-                direction_emoji = "📈" if price_change_pct > 0 else "📉"
-                logger.info(f"Potential Lag - Step 1) {direction_emoji} Binance movement detected: {self.symbol} moved {price_change_pct:+.2f}% "
-                          f"({start_price:.2f} -> {current_price:.2f}) within {Config.DELTA_DETECTION_WINDOW} seconds")
+                logger.info(f"Potential Lag - Step 1) ✅ Threshold exceeded: {crypto_name} ({self.symbol}) moved {price_change_pct:+.2f}% "
+                          f"(${start_price:.2f} -> ${current_price:.2f}) within {Config.DELTA_DETECTION_WINDOW} seconds")
                 
                 return move_info
         
         return None
+    
+    def _get_crypto_name(self, symbol: str) -> str:
+        """Get cryptocurrency name from symbol"""
+        # Map common symbols to names
+        symbol_to_name = {
+            'BTC/USDT': 'Bitcoin',
+            'ETH/USDT': 'Ethereum',
+            'SOL/USDT': 'Solana',
+            'BNB/USDT': 'BNB',
+            'XRP/USDT': 'XRP',
+            'ADA/USDT': 'Cardano',
+            'DOGE/USDT': 'Dogecoin',
+            'DOT/USDT': 'Polkadot',
+            'MATIC/USDT': 'Polygon',
+            'AVAX/USDT': 'Avalanche'
+        }
+        
+        # Check if we have a direct mapping
+        if symbol in symbol_to_name:
+            return symbol_to_name[symbol]
+        
+        # Try to find in TOP_CRYPTOS config
+        for crypto in Config.TOP_CRYPTOS:
+            if crypto.get('symbol') == symbol:
+                return crypto.get('name', symbol.split('/')[0])
+        
+        # Fallback: use the base symbol (e.g., "BTC" from "BTC/USDT")
+        return symbol.split('/')[0]
     
     def detect_pump(self) -> Optional[Dict]:
         """Legacy method - redirects to detect_delta_move"""

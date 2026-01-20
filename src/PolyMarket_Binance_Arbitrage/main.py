@@ -29,9 +29,22 @@ def detailed(self, message, *args, **kws):
 
 logging.Logger.detailed = detailed
 
+# Add custom MOVEMENT logging level
+MOVEMENT_LEVEL = logging.DEBUG + 2  # Between DETAILED and INFO
+logging.addLevelName(MOVEMENT_LEVEL, "MOVEMENT")
+
+def movement(self, message, *args, **kws):
+    """Custom logging method for MOVEMENT level"""
+    if self.isEnabledFor(MOVEMENT_LEVEL):
+        self._log(MOVEMENT_LEVEL, message, args, **kws)
+
+logging.Logger.movement = movement
+
 # Set logging level based on config
 if Config.LOG_LEVEL.upper() == "DETAILED":
     log_level = DETAILED_LEVEL
+elif Config.LOG_LEVEL.upper() == "MOVEMENT":
+    log_level = MOVEMENT_LEVEL
 else:
     log_level = logging.INFO
 
