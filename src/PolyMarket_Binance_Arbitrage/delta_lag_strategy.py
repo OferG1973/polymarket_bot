@@ -176,13 +176,22 @@ class DeltaLagStrategy:
         
         # Skip if already have position
         if market_id in self.active_positions:
+            market_title = market.get('title', 'unknown')[:60]
+            logger.info(
+                f"Potential Lag - Step 3) Skipping lag check for market: {market_title} - "
+                f"active position already open for this market"
+            )
             return
         
         # Get current Polymarket prices
         poly_prices = self.poly_monitor.get_market_prices(market_id)
         
         if not poly_prices:
-            logger.debug(f"   No Polymarket price data for {market.get('title', 'unknown')[:50]}")
+            market_title = market.get('title', 'unknown')[:60]
+            logger.info(
+                f"Potential Lag - Step 3) No lag detected for market: {market_title} - "
+                f"no Polymarket orderbook/price data available yet for this market"
+            )
             return
         
         # Get last known Polymarket price
@@ -269,6 +278,11 @@ class DeltaLagStrategy:
                                f"Time: {time_since_update:.1f}s)")
         else:
             # First time seeing this market, store both prices
+            market_title = market.get('title', 'unknown')[:60]
+            logger.info(
+                f"Potential Lag - Step 3) No lag evaluation yet for market: {market_title} - "
+                "first Polymarket observation, initializing baseline prices for future lag checks"
+            )
             self.last_poly_prices[market_id] = {
                 'token_a': poly_prices.get('token_a', 0),
                 'token_b': poly_prices.get('token_b', 0),
@@ -288,8 +302,20 @@ class DeltaLagStrategy:
         trade_size = max(trade_size, 1.0)
         trade_size = round(trade_size, 2)
         
+        market_title = market.get('title', 'unknown')[:60]
+        binance_move_pct = move_info.get('price_change_pct', 0.0)
+        binance_price = move_info.get('current_price', 0.0)
+
+        # Step 4: Log trade decision details
+        logger.info(f"Potential Lag - Step 4) Preparing trade for market: {market_title}")
+        logger.info(
+            f"   Outcome: {label} ({side_desc}) | Entry Price: {entry_price:.4f} | "
+            f"Trade Size: {trade_size:.2f} | Binance Price: ${binance_price:,.2f} | "
+            f"Binance Move: {binance_move_pct:+.2f}%"
+        )
+
         logger.info(f"🚀 Executing LAG TRADE:")
-        logger.info(f"   Market: {market.get('title', 'unknown')[:60]}")
+        logger.info(f"   Market: {market_title}")
         logger.info(f"   Outcome: {label} ({side_desc})")
         logger.info(f"   Entry Price: {entry_price:.4f}")
         logger.info(f"   Trade Size: {trade_size:.2f}")
@@ -318,12 +344,17 @@ class DeltaLagStrategy:
                 'market': market
             }
             
-            logger.info(f"✅ Position opened: {market.get('title', 'unknown')[:50]} ({label})")
+            logger.info(f"Potential Lag - Step 4) Trade executed successfully for market: {market_title} ({label})")
+            logger.info(f"✅ Position opened: {market_title[:50]} ({label})")
             
             # Schedule exit after hold time
             asyncio.create_task(self._schedule_exit(market_id))
         else:
-            logger.warning(f"⚠️ Trade failed: {market.get('title', 'unknown')[:50]}")
+            logger.warning(f"⚠️ Trade failed: {market_title[:50]}")
+            logger.info(
+                f"Potential Lag - Step 4) Trade NOT executed for market: {market_title} ({label}) - "
+                f"executor returned failure or no confirmation"
+            )
     
     async def _schedule_exit(self, market_id: str):
         """Schedule exit after hold time"""
