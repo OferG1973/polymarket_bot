@@ -381,8 +381,8 @@ def main():
                         yes_ask_size = market['yes'].get('ask_size', 0.0)
                         no_bid_size = market['no'].get('bid_size', 0.0)
                         no_ask_size = market['no'].get('ask_size', 0.0)
-                        logging.info(f"         YES: Bid=${yes_bid:.3f} (size: {yes_bid_size:,.0f}) Ask=${yes_ask:.3f} (size: {yes_ask_size:,.0f})\nMarket=${yes_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Hapenning)")
-                        logging.info(f"         NO:  Bid=${no_bid:.3f} (size: {no_bid_size:,.0f}) Ask=${no_ask:.3f} (size: {no_ask_size:,.0f})\nMarket=${no_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_no_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Hapenning)")
+                        logging.info(f"         YES: Bid=${yes_bid:.3f} (size: {yes_bid_size:,.0f}) Ask=${yes_ask:.3f} (size: {yes_ask_size:,.0f})\nMarket=${yes_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Happening)")
+                        logging.info(f"         NO:  Bid=${no_bid:.3f} (size: {no_bid_size:,.0f}) Ask=${no_ask:.3f} (size: {no_ask_size:,.0f})\nMarket=${no_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_no_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Happening)")
                         
                         # Calculate edge and profit margin for YES
                         if yes_ask > 0:
