@@ -344,12 +344,18 @@ def main():
                     for market in polymarket_markets:
                         strike = market['strike_price']
                         label = market['label']
-                        yes_price = market['yes']['price']
-                        yes_bid = market['yes']['bid']
-                        yes_ask = market['yes']['ask']
-                        no_price = market['no']['price']
-                        no_bid = market['no']['bid']
-                        no_ask = market['no']['ask']
+                        # Get option labels (e.g., "YES"/"NO" or "Up"/"Down")
+                        option_0_label = market.get('option_0_label', 'YES')
+                        option_1_label = market.get('option_1_label', 'NO')
+                        # Get option data
+                        option_0 = market['option_0']
+                        option_1 = market['option_1']
+                        option_0_price = option_0['price']
+                        option_0_bid = option_0['bid']
+                        option_0_ask = option_0['ask']
+                        option_1_price = option_1['price']
+                        option_1_bid = option_1['bid']
+                        option_1_ask = option_1['ask']
                         
                         # Determine if "reach" means >= (include_equal=True) or > (include_equal=False)
                         # "Reach", "hit", "touch" typically mean >= (equal or above/below)
@@ -358,14 +364,28 @@ def main():
                         include_equal = any(word in question_lower for word in ['reach', 'hit', 'touch', 'at least', 'at most'])
                         
                         # Calculate the fair price (probability) of the event happening
-                        # For example: If the market is will bitcoin reach $150,000 in January 2026? Fair for YES answer = $0.000: The model estimates 0% chance Bitcoin will reach $150,000
-                        fair_price = get_smart_probability(price, strike, probs, vol_6h, 
-                                                          direction=market['direction'], 
-                                                          include_equal=include_equal)
-                        
-                        # Calculate the fair price (probability) of the event not happening
-                        # For example: If the market is will bitcoin reach $150,000 in January 2026? Fair for NO answer = $1.000: The model estimates 100% chance Bitcoin will reach $150,000
-                        fair_no_price = 1 - fair_price
+                        # For direction=1 (above), option_0 typically represents the bullish outcome (YES/Up)
+                        # For direction=-1 (below), option_0 typically represents the bearish outcome
+                        # We need to map based on direction to determine which option corresponds to the event
+                        if market['direction'] == 1:
+                            # Above direction: option_0 is typically YES/Up (event happening)
+                            fair_price_option_0 = get_smart_probability(price, strike, probs, vol_6h, 
+                                                                        direction=market['direction'], 
+                                                                        include_equal=include_equal)
+                            fair_price_option_1 = 1 - fair_price_option_0
+                        elif market['direction'] == -1:
+                            # Below direction: option_0 might be YES (price below strike) or NO (price above strike)
+                            # We'll assume option_0 is the "event happening" outcome
+                            fair_price_option_0 = get_smart_probability(price, strike, probs, vol_6h, 
+                                                                        direction=market['direction'], 
+                                                                        include_equal=include_equal)
+                            fair_price_option_1 = 1 - fair_price_option_0
+                        else:
+                            # Range: default to option_0
+                            fair_price_option_0 = get_smart_probability(price, strike, probs, vol_6h, 
+                                                                        direction=1, 
+                                                                        include_equal=include_equal)
+                            fair_price_option_1 = 1 - fair_price_option_0
                         
                         direction_str = {1: "above", -1: "below", 0: "range"}.get(market['direction'], "unknown")
                         equality_str = ">=" if include_equal else ">"
@@ -374,45 +394,45 @@ def main():
                         elif market['direction'] == 0:
                             equality_str = "range"
                         
-                        logging.info(f"      🔮 POLYMARKET | {label[:40]}...")
+                        logging.info(f"      🔮 POLYMARKET | {label[:40]} ({market['question']})")
                         logging.info(f"         Strike: ${strike:,.0f} ({direction_str}, {equality_str}) | Current Vol(6h): {vol_6h:.3%}")
                         # Market price = midpoint between bid and ask (for reference only, use ask for buying)
-                        yes_bid_size = market['yes'].get('bid_size', 0.0)
-                        yes_ask_size = market['yes'].get('ask_size', 0.0)
-                        no_bid_size = market['no'].get('bid_size', 0.0)
-                        no_ask_size = market['no'].get('ask_size', 0.0)
-                        logging.info(f"         YES: Bid=${yes_bid:.3f} (size: {yes_bid_size:,.0f}) Ask=${yes_ask:.3f} (size: {yes_ask_size:,.0f})\nMarket=${yes_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Happening)")
-                        logging.info(f"         NO:  Bid=${no_bid:.3f} (size: {no_bid_size:,.0f}) Ask=${no_ask:.3f} (size: {no_ask_size:,.0f})\nMarket=${no_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_no_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Happening)")
+                        option_0_bid_size = option_0.get('bid_size', 0.0)
+                        option_0_ask_size = option_0.get('ask_size', 0.0)
+                        option_1_bid_size = option_1.get('bid_size', 0.0)
+                        option_1_ask_size = option_1.get('ask_size', 0.0)
+                        logging.info(f"         {option_0_label}: Bid=${option_0_bid:.3f} (size: {option_0_bid_size:,.0f}) Ask=${option_0_ask:.3f} (size: {option_0_ask_size:,.0f})\nMarket=${option_0_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price_option_0:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
+                        logging.info(f"         {option_1_label}:  Bid=${option_1_bid:.3f} (size: {option_1_bid_size:,.0f}) Ask=${option_1_ask:.3f} (size: {option_1_ask_size:,.0f})\nMarket=${option_1_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price_option_1:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
                         
-                        # Calculate edge and profit margin for YES
-                        if yes_ask > 0:
-                            edge_yes = fair_price - yes_ask  # Use ask price (what you pay)
-                            profit_margin_yes = (1.0 - yes_ask) / yes_ask if yes_ask > 0 else 0  # Profit if YES wins
+                        # Calculate edge and profit margin for Option 0
+                        if option_0_ask > 0:
+                            edge_option_0 = fair_price_option_0 - option_0_ask  # Use ask price (what you pay)
+                            profit_margin_option_0 = (1.0 - option_0_ask) / option_0_ask if option_0_ask > 0 else 0  # Profit if Option 0 wins
                             
-                            if edge_yes > 0:
-                                if yes_ask > MAX_POLYMARKET_ASK_PRICE:
-                                    logging.info(f"         ❌ DONT BUY YES | Edge: +{edge_yes:.1%} but Ask=${yes_ask:.3f} > ${MAX_POLYMARKET_ASK_PRICE:.2f} | Reason: Profit too low (${profit_margin_yes:.1%} after payout, not worth it after fees)")
-                                elif profit_margin_yes < MIN_POLYMARKET_PROFIT_MARGIN:
-                                    logging.info(f"         ❌ DONT BUY YES | Edge: +{edge_yes:.1%} but Profit=${profit_margin_yes:.1%} < {MIN_POLYMARKET_PROFIT_MARGIN:.0%} | Reason: Profit margin too low")
+                            if edge_option_0 > 0:
+                                if option_0_ask > MAX_POLYMARKET_ASK_PRICE:
+                                    logging.info(f"         ❌ DONT BUY {option_0_label} | Edge: +{edge_option_0:.1%} but Ask=${option_0_ask:.3f} > ${MAX_POLYMARKET_ASK_PRICE:.2f} | Reason: Profit too low (${profit_margin_option_0:.1%} after payout, not worth it after fees)")
+                                elif profit_margin_option_0 < MIN_POLYMARKET_PROFIT_MARGIN:
+                                    logging.info(f"         ❌ DONT BUY {option_0_label} | Edge: +{edge_option_0:.1%} but Profit=${profit_margin_option_0:.1%} < {MIN_POLYMARKET_PROFIT_MARGIN:.0%} | Reason: Profit margin too low")
                                 else:
-                                    logging.info(f"         ✅ BUY YES | Edge: +{edge_yes:.1%} | Profit=${profit_margin_yes:.1%} (FAVORABLE - BUY YES)")
+                                    logging.info(f"         ✅ BUY {option_0_label} | Edge: +{edge_option_0:.1%} | Profit=${profit_margin_option_0:.1%} (FAVORABLE - BUY {option_0_label})")
                             else:
-                                logging.info(f"         ❌ DONT BUY YES | Edge: {edge_yes:.1%} (unfavorable - fair price below ask)")
+                                logging.info(f"         ❌ DONT BUY {option_0_label} | Edge: {edge_option_0:.1%} (unfavorable - fair price below ask)")
                         
-                        # Calculate edge and profit margin for NO
-                        if no_ask > 0:
-                            edge_no = fair_no_price - no_ask  # Use ask price (what you pay)
-                            profit_margin_no = (1.0 - no_ask) / no_ask if no_ask > 0 else 0  # Profit if NO wins
+                        # Calculate edge and profit margin for Option 1
+                        if option_1_ask > 0:
+                            edge_option_1 = fair_price_option_1 - option_1_ask  # Use ask price (what you pay)
+                            profit_margin_option_1 = (1.0 - option_1_ask) / option_1_ask if option_1_ask > 0 else 0  # Profit if Option 1 wins
                             
-                            if edge_no > 0:
-                                if no_ask > MAX_POLYMARKET_ASK_PRICE:
-                                    logging.info(f"         ❌ DONT BUY NO | Edge: +{edge_no:.1%} but Ask=${no_ask:.3f} > ${MAX_POLYMARKET_ASK_PRICE:.2f} | Reason: Profit too low (${profit_margin_no:.1%} after payout, not worth it after fees)")
-                                elif profit_margin_no < MIN_POLYMARKET_PROFIT_MARGIN:
-                                    logging.info(f"         ❌ DONT BUY NO | Edge: +{edge_no:.1%} but Profit=${profit_margin_no:.1%} < {MIN_POLYMARKET_PROFIT_MARGIN:.0%} | Reason: Profit margin too low")
+                            if edge_option_1 > 0:
+                                if option_1_ask > MAX_POLYMARKET_ASK_PRICE:
+                                    logging.info(f"         ❌ DONT BUY {option_1_label} | Edge: +{edge_option_1:.1%} but Ask=${option_1_ask:.3f} > ${MAX_POLYMARKET_ASK_PRICE:.2f} | Reason: Profit too low (${profit_margin_option_1:.1%} after payout, not worth it after fees)")
+                                elif profit_margin_option_1 < MIN_POLYMARKET_PROFIT_MARGIN:
+                                    logging.info(f"         ❌ DONT BUY {option_1_label} | Edge: +{edge_option_1:.1%} but Profit=${profit_margin_option_1:.1%} < {MIN_POLYMARKET_PROFIT_MARGIN:.0%} | Reason: Profit margin too low")
                                 else:
-                                    logging.info(f"         ✅ BUY NO | Edge: +{edge_no:.1%} | Profit=${profit_margin_no:.1%} (FAVORABLE - BUY NO)")
+                                    logging.info(f"         ✅ BUY {option_1_label} | Edge: +{edge_option_1:.1%} | Profit=${profit_margin_option_1:.1%} (FAVORABLE - BUY {option_1_label})")
                             else:
-                                logging.info(f"         ❌ DONT BUY NO | Edge: {edge_no:.1%} (unfavorable - fair price below ask)")
+                                logging.info(f"         ❌ DONT BUY {option_1_label} | Edge: {edge_option_1:.1%} (unfavorable - fair price below ask)")
                 else:
                     logging.info(f"      ⚠️ No {args.asset} price markets found on Polymarket")
                     

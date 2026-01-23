@@ -92,16 +92,24 @@ def scan_polymarket_markets(asset: str, current_price: float, limit: int = 50) -
             "strike_price": float,
             "label": str,  # Binary option label/outcome
             "direction": int,  # 1=above, -1=below, 0=range
-            "yes": {
+            "option_0": {
                 "price": float,  # Current market price (midpoint or ask)
                 "bid": float,   # Best bid price
-                "ask": float    # Best ask price
+                "ask": float,   # Best ask price
+                "bid_size": float,  # Available liquidity at best bid
+                "ask_size": float,  # Available liquidity at best ask
+                "label": str    # Actual option label (e.g., "YES", "Up", "True")
             },
-            "no": {
+            "option_1": {
                 "price": float,
                 "bid": float,
-                "ask": float
+                "ask": float,
+                "bid_size": float,
+                "ask_size": float,
+                "label": str    # Actual option label (e.g., "NO", "Down", "False")
             },
+            "option_0_label": str,  # First option label from Polymarket
+            "option_1_label": str,   # Second option label from Polymarket
             "question": str,
             "market_id": str,
             "liquidity": float
@@ -227,7 +235,7 @@ def scan_polymarket_markets(asset: str, current_price: float, limit: int = 50) -
                         if strike_price is None:
                             continue
                         
-                        # Get token IDs
+                        # Get token IDs and outcome labels
                         try:
                             tokens = market.get('clobTokenIds')
                             if isinstance(tokens, str):
@@ -235,76 +243,81 @@ def scan_polymarket_markets(asset: str, current_price: float, limit: int = 50) -
                             if not tokens or len(tokens) < 2:
                                 continue
                             
-                            token_yes = tokens[0]
-                            token_no = tokens[1]
+                            # Get actual outcome labels (e.g., ["YES", "NO"] or ["Up", "Down"])
+                            outcome_labels = outcomes if outcomes else ["YES", "NO"]
+                            label_0 = str(outcome_labels[0]).strip() if len(outcome_labels) > 0 else "YES"
+                            label_1 = str(outcome_labels[1]).strip() if len(outcome_labels) > 1 else "NO"
+                            
+                            token_0 = tokens[0]  # First token corresponds to first outcome
+                            token_1 = tokens[1]  # Second token corresponds to second outcome
                         except:
                             continue
                         
-                        # Get order book data
-                        yes_data = {"price": 0.0, "bid": 0.0, "ask": 0.0, "bid_size": 0.0, "ask_size": 0.0}
-                        no_data = {"price": 0.0, "bid": 0.0, "ask": 0.0, "bid_size": 0.0, "ask_size": 0.0}
+                        # Get order book data - use dynamic labels instead of "yes"/"no"
+                        option_0_data = {"price": 0.0, "bid": 0.0, "ask": 0.0, "bid_size": 0.0, "ask_size": 0.0, "label": label_0}
+                        option_1_data = {"price": 0.0, "bid": 0.0, "ask": 0.0, "bid_size": 0.0, "ask_size": 0.0, "label": label_1}
                         
                         try:
-                            # YES token order book
-                            ob_yes = client.get_order_book(token_yes)
+                            # First option token order book
+                            ob_0 = client.get_order_book(token_0)
                             # Get best bid (highest price buyers will pay)
-                            if hasattr(ob_yes, 'bids') and ob_yes.bids and len(ob_yes.bids) > 0:
-                                bid_order = ob_yes.bids[0]
-                                yes_data["bid"] = float(bid_order.price)
+                            if hasattr(ob_0, 'bids') and ob_0.bids and len(ob_0.bids) > 0:
+                                bid_order = ob_0.bids[0]
+                                option_0_data["bid"] = float(bid_order.price)
                                 # Get bid size (available liquidity at best bid)
                                 if hasattr(bid_order, 'size'):
-                                    yes_data["bid_size"] = float(bid_order.size)
+                                    option_0_data["bid_size"] = float(bid_order.size)
                                 else:
-                                    yes_data["bid_size"] = 0.0
+                                    option_0_data["bid_size"] = 0.0
                             # Get best ask (lowest price sellers will accept)
-                            if hasattr(ob_yes, 'asks') and ob_yes.asks and len(ob_yes.asks) > 0:
-                                ask_order = ob_yes.asks[0]
-                                yes_data["ask"] = float(ask_order.price)
+                            if hasattr(ob_0, 'asks') and ob_0.asks and len(ob_0.asks) > 0:
+                                ask_order = ob_0.asks[0]
+                                option_0_data["ask"] = float(ask_order.price)
                                 # Get ask size (available liquidity at best ask)
                                 if hasattr(ask_order, 'size'):
-                                    yes_data["ask_size"] = float(ask_order.size)
+                                    option_0_data["ask_size"] = float(ask_order.size)
                                 else:
-                                    yes_data["ask_size"] = 0.0
+                                    option_0_data["ask_size"] = 0.0
                             # Use midpoint if both available, otherwise use ask or bid
-                            if yes_data["bid"] > 0 and yes_data["ask"] > 0:
-                                yes_data["price"] = (yes_data["bid"] + yes_data["ask"]) / 2  # Market price = midpoint
-                            elif yes_data["ask"] > 0:
-                                yes_data["price"] = yes_data["ask"]
-                            elif yes_data["bid"] > 0:
-                                yes_data["price"] = yes_data["bid"]
+                            if option_0_data["bid"] > 0 and option_0_data["ask"] > 0:
+                                option_0_data["price"] = (option_0_data["bid"] + option_0_data["ask"]) / 2  # Market price = midpoint
+                            elif option_0_data["ask"] > 0:
+                                option_0_data["price"] = option_0_data["ask"]
+                            elif option_0_data["bid"] > 0:
+                                option_0_data["price"] = option_0_data["bid"]
                         except Exception as e:
-                            logging.debug(f"Error fetching YES order book for {token_yes}: {e}")
+                            logging.debug(f"Error fetching {label_0} order book for {token_0}: {e}")
                         
                         try:
-                            # NO token order book
-                            ob_no = client.get_order_book(token_no)
+                            # Second option token order book
+                            ob_1 = client.get_order_book(token_1)
                             # Get best bid (highest price buyers will pay)
-                            if hasattr(ob_no, 'bids') and ob_no.bids and len(ob_no.bids) > 0:
-                                bid_order = ob_no.bids[0]
-                                no_data["bid"] = float(bid_order.price)
+                            if hasattr(ob_1, 'bids') and ob_1.bids and len(ob_1.bids) > 0:
+                                bid_order = ob_1.bids[0]
+                                option_1_data["bid"] = float(bid_order.price)
                                 # Get bid size (available liquidity at best bid)
                                 if hasattr(bid_order, 'size'):
-                                    no_data["bid_size"] = float(bid_order.size)
+                                    option_1_data["bid_size"] = float(bid_order.size)
                                 else:
-                                    no_data["bid_size"] = 0.0
+                                    option_1_data["bid_size"] = 0.0
                             # Get best ask (lowest price sellers will accept)
-                            if hasattr(ob_no, 'asks') and ob_no.asks and len(ob_no.asks) > 0:
-                                ask_order = ob_no.asks[0]
-                                no_data["ask"] = float(ask_order.price)
+                            if hasattr(ob_1, 'asks') and ob_1.asks and len(ob_1.asks) > 0:
+                                ask_order = ob_1.asks[0]
+                                option_1_data["ask"] = float(ask_order.price)
                                 # Get ask size (available liquidity at best ask)
                                 if hasattr(ask_order, 'size'):
-                                    no_data["ask_size"] = float(ask_order.size)
+                                    option_1_data["ask_size"] = float(ask_order.size)
                                 else:
-                                    no_data["ask_size"] = 0.0
+                                    option_1_data["ask_size"] = 0.0
                             # Use midpoint if both available, otherwise use ask or bid
-                            if no_data["bid"] > 0 and no_data["ask"] > 0:
-                                no_data["price"] = (no_data["bid"] + no_data["ask"]) / 2  # Market price = midpoint
-                            elif no_data["ask"] > 0:
-                                no_data["price"] = no_data["ask"]
-                            elif no_data["bid"] > 0:
-                                no_data["price"] = no_data["bid"]
+                            if option_1_data["bid"] > 0 and option_1_data["ask"] > 0:
+                                option_1_data["price"] = (option_1_data["bid"] + option_1_data["ask"]) / 2  # Market price = midpoint
+                            elif option_1_data["ask"] > 0:
+                                option_1_data["price"] = option_1_data["ask"]
+                            elif option_1_data["bid"] > 0:
+                                option_1_data["price"] = option_1_data["bid"]
                         except Exception as e:
-                            logging.debug(f"Error fetching NO order book for {token_no}: {e}")
+                            logging.debug(f"Error fetching {label_1} order book for {token_1}: {e}")
                         
                         # Get liquidity
                         liquidity = 0.0
@@ -313,13 +326,17 @@ def scan_polymarket_markets(asset: str, current_price: float, limit: int = 50) -
                         except:
                             pass
                         
-                        # Build result
+                        # Build result - use dynamic option labels
+                        # Map first option to "option_0" and second to "option_1" for consistency
+                        # But also include the actual labels for display
                         result = {
                             "strike_price": strike_price,
                             "label": group_title if group_title else question[:50],
                             "direction": direction,
-                            "yes": yes_data,
-                            "no": no_data,
+                            "option_0": option_0_data,  # First option (e.g., YES, Up, True)
+                            "option_1": option_1_data,  # Second option (e.g., NO, Down, False)
+                            "option_0_label": label_0,   # Actual label from Polymarket
+                            "option_1_label": label_1,   # Actual label from Polymarket
                             "question": question,
                             "market_id": market.get('conditionId', ''),
                             "liquidity": liquidity
