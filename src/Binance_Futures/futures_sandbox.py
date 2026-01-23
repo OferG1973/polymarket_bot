@@ -381,8 +381,8 @@ def main():
                         yes_ask_size = market['yes'].get('ask_size', 0.0)
                         no_bid_size = market['no'].get('bid_size', 0.0)
                         no_ask_size = market['no'].get('ask_size', 0.0)
-                        logging.info(f"         YES: Bid=${yes_bid:.3f} (size: {yes_bid_size:,.0f}) Ask=${yes_ask:.3f} (size: {yes_ask_size:,.0f}) Market=${yes_price:.3f} (midpoint between bid and ask: (bid + ask) / 2) | Fair=${fair_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Hapenning)")
-                        logging.info(f"         NO:  Bid=${no_bid:.3f} (size: {no_bid_size:,.0f}) Ask=${no_ask:.3f} (size: {no_ask_size:,.0f}) Market=${no_price:.3f} (midpoint between bid and ask: (bid + ask) / 2) | Fair=${fair_no_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Hapenning)")
+                        logging.info(f"         YES: Bid=${yes_bid:.3f} (size: {yes_bid_size:,.0f}) Ask=${yes_ask:.3f} (size: {yes_ask_size:,.0f})\nMarket=${yes_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Hapenning)")
+                        logging.info(f"         NO:  Bid=${no_bid:.3f} (size: {no_bid_size:,.0f}) Ask=${no_ask:.3f} (size: {no_ask_size:,.0f})\nMarket=${no_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_no_price:.3f} ($0.00 = 100% NOT Happing $1.00 100% Hapenning)")
                         
                         # Calculate edge and profit margin for YES
                         if yes_ask > 0:
@@ -391,13 +391,13 @@ def main():
                             
                             if edge_yes > 0:
                                 if yes_ask > MAX_POLYMARKET_ASK_PRICE:
-                                    logging.info(f"         ❌ YES Edge: +{edge_yes:.1%} but Ask=${yes_ask:.3f} > ${MAX_POLYMARKET_ASK_PRICE:.2f} | Reason: Profit too low (${profit_margin_yes:.1%} after payout, not worth it after fees)")
+                                    logging.info(f"         ❌ DONT BUY YES | Edge: +{edge_yes:.1%} but Ask=${yes_ask:.3f} > ${MAX_POLYMARKET_ASK_PRICE:.2f} | Reason: Profit too low (${profit_margin_yes:.1%} after payout, not worth it after fees)")
                                 elif profit_margin_yes < MIN_POLYMARKET_PROFIT_MARGIN:
-                                    logging.info(f"         ❌ YES Edge: +{edge_yes:.1%} but Profit=${profit_margin_yes:.1%} < {MIN_POLYMARKET_PROFIT_MARGIN:.0%} | Reason: Profit margin too low")
+                                    logging.info(f"         ❌ DONT BUY YES | Edge: +{edge_yes:.1%} but Profit=${profit_margin_yes:.1%} < {MIN_POLYMARKET_PROFIT_MARGIN:.0%} | Reason: Profit margin too low")
                                 else:
-                                    logging.info(f"         ✅ YES Edge: +{edge_yes:.1%} | Profit=${profit_margin_yes:.1%} (FAVORABLE - BUY YES)")
+                                    logging.info(f"         ✅ BUY YES | Edge: +{edge_yes:.1%} | Profit=${profit_margin_yes:.1%} (FAVORABLE - BUY YES)")
                             else:
-                                logging.info(f"         ❌ YES Edge: {edge_yes:.1%} (unfavorable - fair price below ask)")
+                                logging.info(f"         ❌ DONT BUY YES | Edge: {edge_yes:.1%} (unfavorable - fair price below ask)")
                         
                         # Calculate edge and profit margin for NO
                         if no_ask > 0:
@@ -406,13 +406,13 @@ def main():
                             
                             if edge_no > 0:
                                 if no_ask > MAX_POLYMARKET_ASK_PRICE:
-                                    logging.info(f"         ❌ NO Edge: +{edge_no:.1%} but Ask=${no_ask:.3f} > ${MAX_POLYMARKET_ASK_PRICE:.2f} | Reason: Profit too low (${profit_margin_no:.1%} after payout, not worth it after fees)")
+                                    logging.info(f"         ❌ DONT BUY NO | Edge: +{edge_no:.1%} but Ask=${no_ask:.3f} > ${MAX_POLYMARKET_ASK_PRICE:.2f} | Reason: Profit too low (${profit_margin_no:.1%} after payout, not worth it after fees)")
                                 elif profit_margin_no < MIN_POLYMARKET_PROFIT_MARGIN:
-                                    logging.info(f"         ❌ NO Edge: +{edge_no:.1%} but Profit=${profit_margin_no:.1%} < {MIN_POLYMARKET_PROFIT_MARGIN:.0%} | Reason: Profit margin too low")
+                                    logging.info(f"         ❌ DONT BUY NO | Edge: +{edge_no:.1%} but Profit=${profit_margin_no:.1%} < {MIN_POLYMARKET_PROFIT_MARGIN:.0%} | Reason: Profit margin too low")
                                 else:
-                                    logging.info(f"         ✅ NO Edge: +{edge_no:.1%} | Profit=${profit_margin_no:.1%} (FAVORABLE - BUY NO)")
+                                    logging.info(f"         ✅ BUY NO | Edge: +{edge_no:.1%} | Profit=${profit_margin_no:.1%} (FAVORABLE - BUY NO)")
                             else:
-                                logging.info(f"         ❌ NO Edge: {edge_no:.1%} (unfavorable - fair price below ask)")
+                                logging.info(f"         ❌ DONT BUY NO | Edge: {edge_no:.1%} (unfavorable - fair price below ask)")
                 else:
                     logging.info(f"      ⚠️ No {args.asset} price markets found on Polymarket")
                     
