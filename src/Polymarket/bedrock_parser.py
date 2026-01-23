@@ -11,6 +11,7 @@ DATA_DIR = os.path.join("src", "Polymarket")
 POLYMARKETS_TO_IGNORE_FILE = os.path.join(DATA_DIR, "polymarkets_to_ignore.csv")
 LOCAL_LLM_URL = "http://localhost:11434/api/generate"
 LOCAL_MODEL_NAME = "qwen2.5:14b"
+LOCAL_LLM_TIMEOUT = 30  # Timeout in seconds for local LLM calls
 
 class MarketParser:
     def __init__(self, region_name="us-east-1"):
@@ -21,6 +22,28 @@ class MarketParser:
         # Logging
         self.log_file = "llm_calls.csv"
         self._init_log()
+        
+        # Check if local LLM is available
+        self._check_local_llm_availability()
+    
+    def _check_local_llm_availability(self):
+        """Check if Ollama is running and the model is available."""
+        try:
+            # Quick health check
+            health_url = "http://localhost:11434/api/tags"
+            resp = requests.get(health_url, timeout=2)
+            if resp.status_code == 200:
+                models = resp.json().get("models", [])
+                model_names = [m.get("name", "") for m in models]
+                if LOCAL_MODEL_NAME in model_names:
+                    print(f"      ✅ Local LLM available: {LOCAL_MODEL_NAME}")
+                else:
+                    print(f"      ⚠️ Model {LOCAL_MODEL_NAME} not found. Available models: {model_names}")
+                    print(f"      💡 Pull the model with: ollama pull {LOCAL_MODEL_NAME}")
+        except requests.exceptions.ConnectionError:
+            print(f"      ⚠️ Ollama not running. Start it with: ollama serve")
+        except Exception as e:
+            print(f"      ⚠️ Could not check Ollama status: {e}")
 
     def _init_log(self):
         if not os.path.exists(self.log_file):
@@ -104,7 +127,8 @@ class MarketParser:
         }
         
         try:
-            resp = requests.post(LOCAL_LLM_URL, json=payload, timeout=10) # 10s timeout
+            # Use configurable timeout (default 30s) for larger models
+            resp = requests.post(LOCAL_LLM_URL, json=payload, timeout=LOCAL_LLM_TIMEOUT)
             if resp.status_code == 200:
                 response_json = resp.json()
                 raw_text = response_json.get("response", "")
@@ -120,11 +144,16 @@ class MarketParser:
             
             return None # Malformed response
             
+        except requests.exceptions.Timeout:
+            print(f"      ⚠️ Local LLM timeout ({LOCAL_LLM_TIMEOUT}s). Model may be slow or overloaded.")
+            print(f"      💡 Suggestions: Use a smaller model, increase LOCAL_LLM_TIMEOUT, or check Ollama performance")
+            return None
         except requests.exceptions.ConnectionError:
-            print("      ⚠️ Local LLM offline. Switching to Bedrock.")
+            print("      ⚠️ Local LLM offline. Is Ollama running? Try: ollama serve")
             return None
         except Exception as e:
             print(f"      ⚠️ Local LLM Error: {e}")
+            print(f"      💡 Check if Ollama is running: curl http://localhost:11434/api/tags")
             return None
 
     def _call_bedrock(self, question):

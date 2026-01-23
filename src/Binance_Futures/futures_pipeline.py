@@ -137,12 +137,18 @@ def fetch_and_process():
     # 5. INDICATORS
     df = calculate_indicators(df)
 
-    # 6. LABELS (Multi-Class 0, 1, 2)
+    # 6. LABELS (Multi-Class 0, 1, 2) - 6-hour forward prediction
+    # Class 0 (NEUTRAL): Price stays flat (within -TARGET_PCT to +TARGET_PCT)
+    # Class 1 (LONG): Price goes UP by more than TARGET_PCT
+    # Class 2 (SHORT): Price goes DOWN by more than TARGET_PCT
     df['future_close'] = df['Close'].shift(-LOOKAHEAD_HOURS)
     df['future_return'] = (df['future_close'] - df['Close']) / df['Close']
     
+    # Initialize all as NEUTRAL (class 0)
     df['target'] = 0
+    # LONG (class 1): Future return > TARGET_PCT (price increases significantly)
     df.loc[df['future_return'] > TARGET_PCT, 'target'] = 1
+    # SHORT (class 2): Future return < -TARGET_PCT (price decreases significantly)
     df.loc[df['future_return'] < -TARGET_PCT, 'target'] = 2
     
     df.dropna(subset=['rsi', 'trend_signal', 'volatility', 'target'], inplace=True)

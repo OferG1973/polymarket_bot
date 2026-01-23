@@ -74,6 +74,22 @@ def train():
     
     acc = accuracy_score(y_test, final_pred_classes)
     print(f"\n🏆 Ensemble Accuracy: {acc:.2%}")
+    
+    # Class-wise performance
+    from sklearn.metrics import classification_report, confusion_matrix
+    print(f"\n📊 Classification Report:")
+    print(classification_report(y_test, final_pred_classes, 
+                                target_names=['Neutral (0)', 'Long (1)', 'Short (2)']))
+    
+    # Verify 3-class setup
+    unique_classes = np.unique(y_test)
+    print(f"\n✅ Verified: Model predicts {len(unique_classes)} classes: {unique_classes}")
+    print(f"   Class distribution in test set:")
+    for cls in [0, 1, 2]:
+        count = (y_test == cls).sum()
+        pct = count / len(y_test) * 100
+        class_name = ['Neutral', 'Long', 'Short'][cls]
+        print(f"   {class_name} (class {cls}): {count} samples ({pct:.1f}%)")
 
 if __name__ == "__main__":
     train()
