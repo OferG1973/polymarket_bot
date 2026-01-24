@@ -342,7 +342,7 @@ def main():
                     
                     # D. Calculate Fair Price for each market
                     for market in polymarket_markets:
-                        logging.info("      " + "*" * 80)
+                        logging.info("      " + "=" * 100)
                         logging.info(f"      🔍 Current {args.asset} price: {price}")
                         # Print model prediction summary for the next X hours
                         # Use LOOKAHEAD_HOURS which is the actual prediction horizon used by the model
