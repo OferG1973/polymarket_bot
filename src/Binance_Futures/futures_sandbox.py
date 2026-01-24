@@ -418,9 +418,9 @@ def main():
                         option_0_ask_size = option_0.get('ask_size', 0.0)
                         option_1_bid_size = option_1.get('bid_size', 0.0)
                         option_1_ask_size = option_1.get('ask_size', 0.0)
-                        logging.info(f"         Option {option_0_label}:")
+                        logging.info(f"         Option {option_0_label}:\n                               ------------")
                         logging.info(f"         Bid (Want to buy)=${option_0_bid:.3f} (size: {option_0_bid_size:,.0f}) Ask (Want to sell)=${option_0_ask:.3f} (size: {option_0_ask_size:,.0f})\n                               Market=${option_0_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\n                               Fair=${fair_price_option_0:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)\n")
-                        logging.info(f"         Option {option_1_label}:")
+                        logging.info(f"         Option {option_1_label}:\n                               ------------")
                         logging.info(f"         Bid (Want to buy)=${option_1_bid:.3f} (size: {option_1_bid_size:,.0f}) Ask (Want to sell)=${option_1_ask:.3f} (size: {option_1_ask_size:,.0f})\n                               Market=${option_1_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\n                               Fair=${fair_price_option_1:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)\n")
                         logging.info(
                             "         Edge (Fair Price - Ask Price) Thresholds:\n"
