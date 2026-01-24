@@ -6,6 +6,7 @@ from py_clob_client.client import ClobClient
 from datetime import datetime
 import sys
 import os
+import pandas as pd
 
 # Add parent directory to path to import bedrock_parser
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'Polymarket'))
@@ -207,6 +208,26 @@ def scan_polymarket_markets(asset: str, current_price: float, limit: int = 50) -
                                 continue
                         except:
                             continue
+                        
+                        # Filter: Only include markets ending within the next 24 hours
+                        try:
+                            end_date_str = market.get('endDate')
+                            if end_date_str:
+                                end_dt = pd.to_datetime(end_date_str).replace(tzinfo=None)
+                                hours_until_end = (end_dt - datetime.now()).total_seconds() / 3600
+                                
+                                if hours_until_end > 24:
+                                    # Market ends more than 24 hours away, skip it
+                                    logging.debug(f"      ⏭️ Skipping market (ends in {hours_until_end:.1f} hours): {question[:60]}...")
+                                    continue
+                                elif hours_until_end < 0:
+                                    # Market already ended, skip it
+                                    logging.debug(f"      ⏭️ Skipping market (already ended): {question[:60]}...")
+                                    continue
+                        except Exception as e:
+                            # If we can't parse the end date, log and continue (don't skip)
+                            logging.debug(f"      ⚠️ Could not parse endDate for market: {question[:60]}... | Error: {e}")
+                            # Continue processing - don't skip markets with unparseable dates
                         
                         # Parse strike price from group title first (fast path)
                         strike_price, direction = parse_group_title(group_title)

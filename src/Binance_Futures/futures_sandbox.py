@@ -401,8 +401,8 @@ def main():
                         option_0_ask_size = option_0.get('ask_size', 0.0)
                         option_1_bid_size = option_1.get('bid_size', 0.0)
                         option_1_ask_size = option_1.get('ask_size', 0.0)
-                        logging.info(f"         {option_0_label}: Bid=${option_0_bid:.3f} (size: {option_0_bid_size:,.0f}) Ask=${option_0_ask:.3f} (size: {option_0_ask_size:,.0f})\nMarket=${option_0_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price_option_0:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
-                        logging.info(f"         {option_1_label}:  Bid=${option_1_bid:.3f} (size: {option_1_bid_size:,.0f}) Ask=${option_1_ask:.3f} (size: {option_1_ask_size:,.0f})\nMarket=${option_1_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price_option_1:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
+                        logging.info(f"         {option_0_label}: Bid (Want to buy)=${option_0_bid:.3f} (size: {option_0_bid_size:,.0f}) Ask (Want to sell)=${option_0_ask:.3f} (size: {option_0_ask_size:,.0f})\nMarket=${option_0_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price_option_0:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
+                        logging.info(f"         {option_1_label}:  Bid (Want to buy)=${option_1_bid:.3f} (size: {option_1_bid_size:,.0f}) Ask (Want to sell)=${option_1_ask:.3f} (size: {option_1_ask_size:,.0f})\nMarket=${option_1_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price_option_1:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
                         
                         # Calculate edge and profit margin for Option 0
                         if option_0_ask > 0:
