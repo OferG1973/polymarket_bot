@@ -342,12 +342,29 @@ def main():
                     
                     # D. Calculate Fair Price for each market
                     for market in polymarket_markets:
+                        print("=" * 80)
+                        print(f"Current {args.asset} price: {price}")
+                        # Print model prediction summary for the next X hours
+                        # Use LOOKAHEAD_HOURS which is the actual prediction horizon used by the model
+                        prediction_icons = {
+                            'long': '📈',
+                            'short': '📉',
+                            'neutral': '🤝'
+                        }
+                        predictions = [
+                            (f"Long   {prediction_icons['long']}", prob_long),
+                            (f"Short  {prediction_icons['short']}", prob_short),
+                            (f"Flat   {prediction_icons['neutral']}", prob_neutral)
+                        ]
+                        print(f"🔮 Model {LOOKAHEAD_HOURS}h prediction results:")
+                        for label, prob in predictions:
+                            print(f"    {label}: {prob:.2%}")
                         strike = market['strike_price']
                         label = market['label']
                         # Get option labels (e.g., "YES"/"NO" or "Up"/"Down")
                         option_0_label = market.get('option_0_label', 'YES')
                         option_1_label = market.get('option_1_label', 'NO')
-                        # Get option data
+                        # Get option data   
                         option_0 = market['option_0']
                         option_1 = market['option_1']
                         option_0_price = option_0['price']
@@ -401,9 +418,17 @@ def main():
                         option_0_ask_size = option_0.get('ask_size', 0.0)
                         option_1_bid_size = option_1.get('bid_size', 0.0)
                         option_1_ask_size = option_1.get('ask_size', 0.0)
-                        logging.info(f"         {option_0_label}: Bid (Want to buy)=${option_0_bid:.3f} (size: {option_0_bid_size:,.0f}) Ask (Want to sell)=${option_0_ask:.3f} (size: {option_0_ask_size:,.0f})\nMarket=${option_0_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price_option_0:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
-                        logging.info(f"         {option_1_label}:  Bid (Want to buy)=${option_1_bid:.3f} (size: {option_1_bid_size:,.0f}) Ask (Want to sell)=${option_1_ask:.3f} (size: {option_1_ask_size:,.0f})\nMarket=${option_1_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\nFair=${fair_price_option_1:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
-                        
+                        logging.info(f"         Option {option_0_label}:")
+                        logging.info(f"         Bid (Want to buy)=${option_0_bid:.3f} (size: {option_0_bid_size:,.0f}) Ask (Want to sell)=${option_0_ask:.3f} (size: {option_0_ask_size:,.0f})\n                               Market=${option_0_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\n                               Fair=${fair_price_option_0:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
+                        logging.info(f"         Option {option_1_label}:")
+                        logging.info(f"         Bid (Want to buy)=${option_1_bid:.3f} (size: {option_1_bid_size:,.0f}) Ask (Want to sell)=${option_1_ask:.3f} (size: {option_1_ask_size:,.0f})\n                               Market=${option_1_price:.3f} (midpoint between bid and ask: (bid + ask) / 2)\n                               Fair=${fair_price_option_1:.3f} ($0.00 = 100% NOT Happening $1.00 100% Happening)")
+                        logging.info(
+                            "         Edge (Fair Price - Ask Price) Thresholds:\n"
+                            "                               • Edge > 5%     : Strong edge\n"
+                            "                               • 1% < Edge ≤ 5%: Moderate edge\n"
+                            "                               • Edge < 1%     : Weak edge (may not be worth it after fees)\n"
+                            "                               • Edge ≤ 0%     : No edge (do not buy)"
+                        )
                         # Calculate edge and profit margin for Option 0
                         if option_0_ask > 0:
                             edge_option_0 = fair_price_option_0 - option_0_ask  # Use ask price (what you pay)
@@ -418,6 +443,9 @@ def main():
                                     logging.info(f"         ✅ BUY {option_0_label} | Edge: +{edge_option_0:.1%} | Profit=${profit_margin_option_0:.1%} (FAVORABLE - BUY {option_0_label})")
                             else:
                                 logging.info(f"         ❌ DONT BUY {option_0_label} | Edge: {edge_option_0:.1%} (unfavorable - fair price below ask)")
+                        else:
+                            # No ask price available - cannot buy this option
+                            logging.info(f"         ❌ DONT BUY {option_0_label} | Ask=$0.000 | Reason: No sellers available (cannot buy this option)")
                         
                         # Calculate edge and profit margin for Option 1
                         if option_1_ask > 0:
@@ -433,6 +461,9 @@ def main():
                                     logging.info(f"         ✅ BUY {option_1_label} | Edge: +{edge_option_1:.1%} | Profit=${profit_margin_option_1:.1%} (FAVORABLE - BUY {option_1_label})")
                             else:
                                 logging.info(f"         ❌ DONT BUY {option_1_label} | Edge: {edge_option_1:.1%} (unfavorable - fair price below ask)")
+                        else:
+                            # No ask price available - cannot buy this option
+                            logging.info(f"         ❌ DONT BUY {option_1_label} | Ask=$0.000 | Reason: No sellers available (cannot buy this option)")
                 else:
                     logging.info(f"      ⚠️ No {args.asset} price markets found on Polymarket")
                     
