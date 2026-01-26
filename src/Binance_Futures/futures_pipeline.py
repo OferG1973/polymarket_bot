@@ -26,7 +26,7 @@ ASSET_MAP = {
 SYMBOL = ASSET_MAP[args.asset]
 OUTPUT_FILE = os.path.join(DATA_DIR, f"futures_data_{args.asset}.csv")
 
-# --- 6-HOUR STRATEGY SETTINGS (5x Leverage) ---
+# --- 12-HOUR STRATEGY SETTINGS (5x Leverage) ---
 LOOKAHEAD_HOURS = 6   
 TARGET_PCT = 0.008    # 0.8% Price Move * 5x = 4.0% Profit
 
@@ -137,7 +137,7 @@ def fetch_and_process():
     # 5. INDICATORS
     df = calculate_indicators(df)
 
-    # 6. LABELS (Multi-Class 0, 1, 2) - 6-hour forward prediction
+    # 6. LABELS (Multi-Class 0, 1, 2) - 12-hour forward prediction
     # Class 0 (NEUTRAL): Price stays flat (within -TARGET_PCT to +TARGET_PCT)
     # Class 1 (LONG): Price goes UP by more than TARGET_PCT
     # Class 2 (SHORT): Price goes DOWN by more than TARGET_PCT

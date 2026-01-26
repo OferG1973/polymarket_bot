@@ -74,11 +74,17 @@ def get_binance_history(symbol):
         return df['c']
     except: return None
 
-def get_binance_volatility(symbol):
+def get_binance_volatility(symbol, lookahead_hours=None):
     """
     Fetches ~14 days of hourly data to calculate the standard deviation
-    of 6-hour percentage changes.
+    of percentage changes over the prediction horizon (defaults to LOOKAHEAD_HOURS).
+    
+    Args:
+        symbol: Trading symbol (e.g., "BTCUSDT")
+        lookahead_hours: Number of hours for the prediction horizon (defaults to LOOKAHEAD_HOURS)
     """
+    if lookahead_hours is None:
+        lookahead_hours = LOOKAHEAD_HOURS
     try:
         url = "https://fapi.binance.com/fapi/v1/klines"
         # 14 days * 24h = 336. We fetch 500 to be safe.
@@ -88,12 +94,12 @@ def get_binance_volatility(symbol):
         df = pd.DataFrame(resp, columns=["t", "o", "h", "l", "c", "v", "x", "y", "z", "a", "b", "d"])
         df['c'] = df['c'].astype(float)
         
-        # Calculate 6-hour returns
-        df['return_6h'] = df['c'].pct_change(periods=6)
+        # Calculate returns matching the prediction horizon
+        df['return_lookahead'] = df['c'].pct_change(periods=lookahead_hours)
         
         # Calculate Standard Deviation of the last 100 valid periods
         # This gives us the "current" market volatility
-        vol = df['return_6h'].tail(100).std()
+        vol = df['return_lookahead'].tail(100).std()
         
         return float(vol)
     except Exception as e:
@@ -148,7 +154,7 @@ def init_csv():
 
 # --- POLYMARKET MATH ---
 
-def get_smart_probability(current_price, strike_price, probs, volatility_6h, direction=1, include_equal=True):
+def get_smart_probability(current_price, strike_price, probs, volatility_lookahead, direction=1, include_equal=True):
     """
     Calculates the true probability of price hitting strike given XGBoost sentiment.
     
@@ -156,7 +162,7 @@ def get_smart_probability(current_price, strike_price, probs, volatility_6h, dir
         current_price: Current asset price
         strike_price: Target strike price
         probs: dict {'up': float, 'down': float, 'flat': float}
-        volatility_6h: float (calculated dynamically from Binance)
+        volatility_lookahead: float (calculated dynamically from Binance, matching the prediction horizon)
         direction: 1=above, -1=below, 0=range (currently only 1 and -1 are supported)
         include_equal: If True, uses >= or <= (for "reach" markets). If False, uses > or < (strict)
                       For continuous distributions, P(X = strike) = 0, so >= and > are equivalent,
@@ -167,13 +173,13 @@ def get_smart_probability(current_price, strike_price, probs, volatility_6h, dir
     """
     
     # 1. Define the expected price centers for each scenario
-    price_up_scenario   = current_price * (1 + volatility_6h)
-    price_down_scenario = current_price * (1 - volatility_6h)
+    price_up_scenario   = current_price * (1 + volatility_lookahead)
+    price_down_scenario = current_price * (1 - volatility_lookahead)
     price_flat_scenario = current_price # No change
     
     # 2. In the "Flat" scenario, volatility is assumed lower
-    vol_flat = volatility_6h * 0.3
-    vol_trend = volatility_6h 
+    vol_flat = volatility_lookahead * 0.3
+    vol_trend = volatility_lookahead 
 
     # 3. Calculate probability of hitting strike for EACH scenario
     def probability_above_strike(expected_price, vol):
@@ -334,8 +340,8 @@ def main():
                 if polymarket_markets:
                     logging.info(f"      ✅ Found {len(polymarket_markets)} {args.asset} price markets")
                     
-                    # B. Get Dynamic Volatility
-                    vol_6h = get_binance_volatility(TICKER)
+                    # B. Get Dynamic Volatility (matching prediction horizon)
+                    vol_lookahead = get_binance_volatility(TICKER)
                     
                     # C. Format Probs
                     probs = {'up': prob_long, 'down': prob_short, 'flat': prob_neutral}
@@ -386,20 +392,20 @@ def main():
                         # We need to map based on direction to determine which option corresponds to the event
                         if market['direction'] == 1:
                             # Above direction: option_0 is typically YES/Up (event happening)
-                            fair_price_option_0 = get_smart_probability(price, strike, probs, vol_6h, 
+                            fair_price_option_0 = get_smart_probability(price, strike, probs, vol_lookahead, 
                                                                         direction=market['direction'], 
                                                                         include_equal=include_equal)
                             fair_price_option_1 = 1 - fair_price_option_0
                         elif market['direction'] == -1:
                             # Below direction: option_0 might be YES (price below strike) or NO (price above strike)
                             # We'll assume option_0 is the "event happening" outcome
-                            fair_price_option_0 = get_smart_probability(price, strike, probs, vol_6h, 
+                            fair_price_option_0 = get_smart_probability(price, strike, probs, vol_lookahead, 
                                                                         direction=market['direction'], 
                                                                         include_equal=include_equal)
                             fair_price_option_1 = 1 - fair_price_option_0
                         else:
                             # Range: default to option_0
-                            fair_price_option_0 = get_smart_probability(price, strike, probs, vol_6h, 
+                            fair_price_option_0 = get_smart_probability(price, strike, probs, vol_lookahead, 
                                                                         direction=1, 
                                                                         include_equal=include_equal)
                             fair_price_option_1 = 1 - fair_price_option_0
@@ -412,7 +418,7 @@ def main():
                             equality_str = "range"
                         
                         logging.info(f"      🔮 POLYMARKET | {label[:40]} ({market['question']})")
-                        logging.info(f"         Strike: ${strike:,.0f} ({direction_str}, {equality_str}) | Current Vol(6h): {vol_6h:.3%}\n")
+                        logging.info(f"         Strike: ${strike:,.0f} ({direction_str}, {equality_str}) | Current Vol({LOOKAHEAD_HOURS}h): {vol_lookahead:.3%}\n")
                         # Market price = midpoint between bid and ask (for reference only, use ask for buying)
                         option_0_bid_size = option_0.get('bid_size', 0.0)
                         option_0_ask_size = option_0.get('ask_size', 0.0)
