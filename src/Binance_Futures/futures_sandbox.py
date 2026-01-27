@@ -418,6 +418,8 @@ def main():
                             equality_str = "range"
                         
                         logging.info(f"      🔮 POLYMARKET | {label[:40]} ({market['question']})")
+                        logging.info(f"         Market starts at: {market['start_date']}")
+                        logging.info(f"         Market ends at: {market['end_date']}")
                         logging.info(f"         Strike: ${strike:,.0f} ({direction_str}, {equality_str}) | Current Vol({LOOKAHEAD_HOURS}h): {vol_lookahead:.3%}\n")
                         # Market price = midpoint between bid and ask (for reference only, use ask for buying)
                         option_0_bid_size = option_0.get('bid_size', 0.0)

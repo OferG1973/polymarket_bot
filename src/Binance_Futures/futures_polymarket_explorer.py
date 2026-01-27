@@ -10,8 +10,10 @@ import pandas as pd
 
 # Add parent directory to path to import bedrock_parser
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'Polymarket'))
-from Binance_Futures.futures_sandbox import LOOKAHEAD_HOURS
-from bedrock_parser import MarketParser
+from bedrock_parser import MarketParser  # pyright: ignore[reportMissingImports]
+
+# Import LOOKAHEAD_HOURS from futures_pipeline
+from futures_pipeline import LOOKAHEAD_HOURS
 
 # --- CONFIG ---
 HOST = "https://clob.polymarket.com"
@@ -182,6 +184,8 @@ def scan_polymarket_markets(asset: str, current_price: float, limit: int = 50) -
                             break
                             
                         question = market.get('question', '')
+                        start_date = market.get('startDate', '')
+                        end_date = market.get('endDate', '')
                         group_title = market.get('groupItemTitle', '')
                         
                         # Filter by keywords
@@ -210,26 +214,26 @@ def scan_polymarket_markets(asset: str, current_price: float, limit: int = 50) -
                         except:
                             continue
                         
-                        # Filter: Only include markets ending within 11-13 hours (matching 12-hour prediction horizon)
+                        # Filter: Only include markets ending within LOOKAHEAD_HOURS ± 1 hour (matching prediction horizon)
                         try:
                             end_date_str = market.get('endDate')
                             if end_date_str:
                                 end_dt = pd.to_datetime(end_date_str).replace(tzinfo=None)
                                 hours_until_end = (end_dt - datetime.now()).total_seconds() / 3600
                                 
-                                if hours_until_end < LOOKAHEAD_HOURS-1:
-                                    # Market ends in less than 11 hours, skip it
-                                    logging.debug(f"      ⏭️ Skipping market (ends in {hours_until_end:.1f} hours, too soon): {question[:60]}...")
-                                    continue
-                                elif hours_until_end > LOOKAHEAD_HOURS+1:
-                                    # Market ends more than 13 hours away, skip it
-                                    logging.debug(f"      ⏭️ Skipping market (ends in {hours_until_end:.1f} hours, too far): {question[:60]}...")
-                                    continue
-                                elif hours_until_end < 0:
+                                if hours_until_end < 0:
                                     # Market already ended, skip it
                                     logging.debug(f"      ⏭️ Skipping market (already ended): {question[:60]}...")
                                     continue
-                                # If we get here, hours_until_end is between 11 and 13 hours - keep this market
+                                elif hours_until_end < LOOKAHEAD_HOURS - 1:
+                                    # Market ends too soon (less than LOOKAHEAD_HOURS - 1), skip it
+                                    logging.debug(f"      ⏭️ Skipping market (ends in {hours_until_end:.1f} hours, too soon - need {LOOKAHEAD_HOURS-1}-{LOOKAHEAD_HOURS+1}h): {question[:60]}...")
+                                    continue
+                                elif hours_until_end > LOOKAHEAD_HOURS + 1:
+                                    # Market ends too far (more than LOOKAHEAD_HOURS + 1), skip it
+                                    logging.debug(f"      ⏭️ Skipping market (ends in {hours_until_end:.1f} hours, too far - need {LOOKAHEAD_HOURS-1}-{LOOKAHEAD_HOURS+1}h): {question[:60]}...")
+                                    continue
+                                # If we get here, hours_until_end is within LOOKAHEAD_HOURS ± 1 hour - keep this market
                         except Exception as e:
                             # If we can't parse the end date, log and continue (don't skip)
                             logging.debug(f"      ⚠️ Could not parse endDate for market: {question[:60]}... | Error: {e}")
@@ -357,6 +361,8 @@ def scan_polymarket_markets(asset: str, current_price: float, limit: int = 50) -
                         # Map first option to "option_0" and second to "option_1" for consistency
                         # But also include the actual labels for display
                         result = {
+                            "start_date": start_date,
+                            "end_date": end_date,
                             "strike_price": strike_price,
                             "label": group_title if group_title else question[:50],
                             "direction": direction,
